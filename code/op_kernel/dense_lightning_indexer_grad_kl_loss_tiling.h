@@ -26,6 +26,7 @@ struct DenseLightningIndexerGradKlLossTilingData {
     uint32_t dkOffset;        // workspace 中 dk 部分和起始浮点偏移
     uint32_t lossOffset;      // workspace 中 loss 累加槽偏移（单个 32B 对齐槽）
     uint32_t wsSysBytes;      // workspace 起始处系统保留字节数（用户数据偏移）
+    uint32_t kiCacheRows;     // keyIndex 行缓存行数（0 表示不做缓存，逐 key 载入）
     uint32_t weightsFp32;     // 1: weights 为 float32
     uint32_t stageElems;      // bf16 输入时的 T 暂存元素数（0 表示不需要）
     uint32_t blockDimUsed;    // 启动核数
@@ -44,6 +45,8 @@ struct DliglUbLayout {
     uint32_t qiFOff;     // (nidx, dimPad) fp32
     uint32_t kiTOff;     // dimPad T
     uint32_t kiFOff;     // dimPad fp32
+    uint32_t kiCacheOff;  // (kiCacheRows, dimPad) fp32：keyIndex 行缓存
+    uint32_t kiCacheTOff; // (kiCacheRows, dimPad) T：keyIndex 行缓存载入暂存
     uint32_t scOff;      // (visPad, n1Pad) fp32 主注意力分数（key-major）
     uint32_t uOff;       // (visPad, nidxPad) fp32 indexer 相似度（key-major, relu 后）
     uint32_t tgtOff;
@@ -79,7 +82,8 @@ constexpr uint32_t QI_STAGE_ROWS = 8u;
 DLIGL_UB_FN DliglUbLayout DliglComputeUbLayout(uint32_t headBlock, uint32_t n1, uint32_t nidx,
                                                uint32_t dimPad, uint32_t visPad, uint32_t n1Pad,
                                                uint32_t nidxPad, uint32_t dkRows, uint32_t inputBytes,
-                                               uint32_t weightBytes, uint32_t stageElems) {
+                                               uint32_t weightBytes, uint32_t stageElems,
+                                               uint32_t kiCacheRows = 0u) {
     DliglUbLayout l;
     uint32_t off = 0;
     uint32_t partElems = ((dimPad + 63u) / 64u) * ((n1 > nidx ? n1 : nidx) + 7u & ~7u);
@@ -117,6 +121,13 @@ DLIGL_UB_FN DliglUbLayout DliglComputeUbLayout(uint32_t headBlock, uint32_t n1, 
     off += ((dimPad * (inputBytes == 4u ? 4u : 2u) + 31u) & ~31u);
     l.kiFOff = off;
     off += ((dimPad * 4u + 31u) & ~31u);
+    // keyIndex 行缓存：一次载入全部 key 的 ki，相似度与梯度两遍都走 UB，省掉 2*vis 次 DMA/同步
+    l.kiCacheOff = off;
+    off += ((kiCacheRows * dimPad * 4u + 31u) & ~31u);
+    l.kiCacheTOff = off;
+    if (inputBytes != 4u) {
+        off += ((kiCacheRows * dimPad * 2u + 31u) & ~31u);
+    }
     l.scOff = off;
     off += ((visPad * n1Pad * 4u + 31u) & ~31u);
     l.uOff = off;

@@ -39,6 +39,7 @@ inline uint32_t DimOf(const gert::Shape &shape, size_t index, uint32_t fallback)
 struct Choice {
     uint32_t headBlock = 1;
     uint32_t dkRows = 0;
+    uint32_t kiCacheRows = 0;
     DliglUbLayout layout{};
     bool valid = false;
 };
@@ -149,24 +150,34 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
     const uint32_t n1Pad = AlignUp(n1, 8u);
     const uint32_t nidxPad = AlignUp(nidx, 8u);
     Choice choice;
+    // ki 缓存优先取 min(s2, 8) 行；UB 放不下时退化为不缓存（逐 key 载入），保证通用性
+    const uint32_t kiCacheCandidates[] = {
+        std::min(s2, 8u), 4u, 2u, 1u, 0u};
     const uint32_t headCandidates[] = {32u, 16u, 8u, 4u, 2u, 1u};
-    for (uint32_t hbRaw : headCandidates) {
-        const uint32_t hb = std::min(hbRaw, n1);
-        const DliglUbLayout base =
-            DliglComputeUbLayout(hb, n1, nidx, dimPad, visPad, n1Pad, nidxPad, 0u, inputBytes,
-                                 weightBytes, stageElems);
-        if (base.totalBytes > ubBudget) {
-            continue;
+    for (uint32_t cacheRaw : kiCacheCandidates) {
+        const uint32_t cacheRows = std::min(cacheRaw, s2);
+        for (uint32_t hbRaw : headCandidates) {
+            const uint32_t hb = std::min(hbRaw, n1);
+            const DliglUbLayout base =
+                DliglComputeUbLayout(hb, n1, nidx, dimPad, visPad, n1Pad, nidxPad, 0u, inputBytes,
+                                     weightBytes, stageElems, cacheRows);
+            if (base.totalBytes > ubBudget) {
+                continue;
+            }
+            const uint32_t remain = ubBudget - base.totalBytes;
+            const uint32_t dkRows = std::min(s2, remain / (dimPad * 4u));
+            const DliglUbLayout probe =
+                DliglComputeUbLayout(hb, n1, nidx, dimPad, visPad, n1Pad, nidxPad, dkRows,
+                                     inputBytes, weightBytes, stageElems, cacheRows);
+            if (probe.totalBytes <= ubBudget) {
+                choice.headBlock = hb;
+                choice.dkRows = dkRows;
+                choice.kiCacheRows = (cacheRows == s2) ? cacheRows : 0u;
+                choice.valid = true;
+                break;
+            }
         }
-        const uint32_t remain = ubBudget - base.totalBytes;
-        const uint32_t dkRows = std::min(s2, remain / (dimPad * 4u));
-        const DliglUbLayout probe =
-            DliglComputeUbLayout(hb, n1, nidx, dimPad, visPad, n1Pad, nidxPad, dkRows, inputBytes,
-                                 weightBytes, stageElems);
-        if (probe.totalBytes <= ubBudget) {
-            choice.headBlock = hb;
-            choice.dkRows = dkRows;
-            choice.valid = true;
+        if (choice.valid) {
             break;
         }
     }
@@ -230,6 +241,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
     tiling->dkOffset = static_cast<uint32_t>(dkOffset);
     tiling->lossOffset = static_cast<uint32_t>(lossOffset);
     tiling->wsSysBytes = sysWorkspace;
+    tiling->kiCacheRows = choice.kiCacheRows;
     tiling->weightsFp32 = weightsFp32;
     tiling->stageElems = stageElems;
     tiling->blockDimUsed = blockDim;

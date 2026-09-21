@@ -69,6 +69,7 @@ public:
         lossOffset_ = td.lossOffset;
         scale_ = td.scale;
         stageElems_ = td.stageElems;
+        kiCacheRows_ = td.kiCacheRows;
         inputBytes_ = static_cast<uint32_t>(sizeof(T));
         weightBytes_ = static_cast<uint32_t>(sizeof(TW));
 
@@ -92,7 +93,8 @@ public:
         workspaceGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(workspace), wsElems);
 
         layout_ = DliglComputeUbLayout(headBlock_, n1_, nidx_, dimPad_, visPad_, n1Pad_, nidxPad_,
-                                       dkRows_, inputBytes_, weightBytes_, stageElems_);
+                                       dkRows_, inputBytes_, weightBytes_, stageElems_,
+                                       kiCacheRows_);
         BuildTensors();
     }
 
@@ -129,6 +131,10 @@ private:
         dqStage_ = LocalTensor<T>(TPosition::VECCALC, layout_.qiStageOff, QI_STAGE_ROWS * dimPad_);
         qiF_ = LocalTensor<float>(TPosition::VECCALC, layout_.qiFOff, nidx_ * dimPad_);
         kiT_ = LocalTensor<CT>(TPosition::VECCALC, layout_.kiTOff, dimPad_);
+        if (kiCacheRows_ > 0u) {
+            kiCache_ = LocalTensor<float>(TPosition::VECCALC, layout_.kiCacheOff, kiCacheRows_ * dimPad_);
+            kiCacheT_ = LocalTensor<T>(TPosition::VECCALC, layout_.kiCacheTOff, kiCacheRows_ * dimPad_);
+        }
         kiF_ = LocalTensor<float>(TPosition::VECCALC, layout_.kiFOff, dimPad_);
         sc_ = LocalTensor<float>(TPosition::VECCALC, layout_.scOff, visPad_ * n1Pad_);
         u_ = LocalTensor<float>(TPosition::VECCALC, layout_.uOff, visPad_ * nidxPad_);
@@ -273,6 +279,43 @@ private:
     __aicore__ inline void LoadKiRow(uint32_t b, uint32_t j) {
         const uint64_t base = (static_cast<uint64_t>(b) * s2_ + j) * dim_;
         LoadRows(keyIndexGm_, base, 1u, kiT_);
+    }
+
+    // 一次载入该 batch 全部 key 的 keyIndex（仅当缓存能装下 s2 行时）
+    __aicore__ inline void LoadKiAll(uint32_t b) {
+        if (kiCacheRows_ < s2_) {
+            return;
+        }
+        SyncVecDone();
+        SyncMte3Done();
+        DataCopyExtParams params{static_cast<uint16_t>(s2_), static_cast<uint32_t>(dim_ * inputBytes_),
+                                 static_cast<uint32_t>((dimPad_ - dim_) * inputBytes_), 0, 0};
+        if constexpr (sizeof(T) == 4u) {
+            DataCopyPad(kiCache_, keyIndexGm_[static_cast<uint64_t>(b) * s2_ * dim_], params,
+                        DataCopyPadExtParams<T>{false, 0, 0, 0});
+            SyncMte2ToVec();
+        } else {
+            DataCopyPad(kiCacheT_, keyIndexGm_[static_cast<uint64_t>(b) * s2_ * dim_], params,
+                        DataCopyPadExtParams<T>{false, 0, 0, 0});
+            SyncMte2ToVec();
+            Cast(kiCache_, kiCacheT_, RoundMode::CAST_NONE, s2_ * dimPad_);
+        }
+        PipeBarrier<PIPE_V>();
+    }
+
+    // 取第 j 个 key 的 ki（fp32）：优先走缓存，否则逐 key 载入
+    __aicore__ inline LocalTensor<float> KiRow(uint32_t b, uint32_t j) {
+        if (kiCacheRows_ >= s2_) {
+            return kiCache_[j * dimPad_];
+        }
+        LoadKiRow(b, j);
+        if constexpr (sizeof(CT) == 4u) {
+            Adds(kiF_, kiT_, 0.0f, dimPad_);
+        } else {
+            SyncVecDone();
+            Cast(kiF_, kiT_, RoundMode::CAST_NONE, dimPad_);
+        }
+        return kiF_;
     }
 
     __aicore__ inline void LoadWeights(uint32_t b, uint32_t row) {
@@ -436,13 +479,7 @@ private:
         // prod_ 只有 headBlock 行容量，索引头按 headBlock 分块，避免 nidx > headBlock 越界
         const uint32_t chunk = headBlock_ == 0u ? 1u : headBlock_;
         for (uint32_t j = 0; j < vis; ++j) {
-            LoadKiRow(b, j);
-            if constexpr (sizeof(T) == 4u) {
-                Adds(kiF_, kiT_, 0.0f, dimPad_);
-            } else {
-                SyncVecDone();
-                Cast(kiF_, kiT_, RoundMode::CAST_NONE, dimPad_);
-            }
+            const LocalTensor<float> ki = KiRow(b, j);
             PipeBarrier<PIPE_V>();
             for (uint32_t i0 = 0; i0 < nidx_; i0 += chunk) {
                 const uint32_t hc = MinU32(chunk, nidx_ - i0);
@@ -451,7 +488,7 @@ private:
                     const uint32_t mask = left > FP32_PER_REPEAT ? FP32_PER_REPEAT : left;
                     BinaryRepeatParams params{1, 1, 1, fStride, fStride, 0};
                     Mul(prod_[p * FP32_PER_REPEAT], qiF_[i0 * dimPad_ + p * FP32_PER_REPEAT],
-                        kiF_[p * FP32_PER_REPEAT], mask, static_cast<uint8_t>(hc), params);
+                        ki[p * FP32_PER_REPEAT], mask, static_cast<uint8_t>(hc), params);
                 }
                 if (pieces > 1u) {
                     BinaryRepeatParams addParams{1, 1, 1, fStride, fStride, fStride};
@@ -546,13 +583,7 @@ private:
         const uint32_t nidxPieces = PiecesOf(nidx_);
         const uint8_t dimStride = static_cast<uint8_t>(dimPad_ / FP32_PER_BLOCK);
         for (uint32_t j = 0; j < vis; ++j) {
-            LoadKiRow(b, j);
-            if constexpr (sizeof(CT) == 4u) {
-                Adds(kiF_, kiT_, 0.0f, dimPad_);
-            } else {
-                SyncVecDone();
-                Cast(kiF_, kiT_, RoundMode::CAST_NONE, dimPad_);
-            }
+            const LocalTensor<float> ki = KiRow(b, j);
             PipeBarrier<PIPE_V>();
             // m = w * delta_j * (u > 0)，u 已含 ReLU
             Muls(dwRow_, u_[j * nidxPad_], INDICATOR_SCALE, nidx_);
@@ -577,7 +608,7 @@ private:
             // dq += ki_j ⊗ m_j
             for (uint32_t p = 0; p < dimPieces; ++p) {
                 BinaryRepeatParams dqParams{1, 1, 0, dimStride, 0, 1};
-                MulAddDst(dq_[p * 64u], kiF_[p * 64u], mblk_, MaskOf(dim_, p),
+                MulAddDst(dq_[p * 64u], ki[p * 64u], mblk_, MaskOf(dim_, p),
                           static_cast<uint8_t>(nidx_), dqParams);
             }
             PipeBarrier<PIPE_V>();
@@ -704,6 +735,7 @@ private:
         LoadWeights(b, row);
         LoadQRow(b, row);
         LoadQiAll(b, row);
+        LoadKiAll(b);
         ComputeScores(b, vis);
         ComputeTarget(vis);
         ComputeSimilarity(b, vis);
@@ -796,7 +828,7 @@ private:
     uint32_t causal_ = 1, rowsPerTask_ = 1, blocksPerBatch_ = 1, taskCount_ = 1;
     uint32_t headBlock_ = 1, dkRows_ = 0, splitDk_ = 0;
     uint32_t dkPartialElems_ = 0, dkOffset_ = 0, lossOffset_ = 0, inputBytes_ = 2, weightBytes_ = 2;
-    uint32_t stageElems_ = 0;
+    uint32_t stageElems_ = 0, kiCacheRows_ = 0;
     uint32_t coreNum_ = 1;
     float scale_ = 1.0f;
     float rowLoss_ = 0.0f;
@@ -805,9 +837,9 @@ private:
     DliglUbLayout layout_;
 
     LocalTensor<CT> qT_, kT_, prodT_, kiT_;
-    LocalTensor<T> qiStage_, dqStage_;
+    LocalTensor<T> qiStage_, dqStage_, kiCacheT_;
     LocalTensor<T> stageRaw_, outT_;
-    LocalTensor<float> prod_, qiF_, kiF_, sc_, u_, tgt_, sh_, pred_, del_, dkAcc_, dkRow_, dq_;
+    LocalTensor<float> prod_, qiF_, kiF_, kiCache_, sc_, u_, tgt_, sh_, pred_, del_, dkAcc_, dkRow_, dq_;
     LocalTensor<float> maxVec_, dblk_, mblk_, part_, w_, wb_, dw_, dwRow_, scratch_;
     LocalTensor<float> lossAcc_, lz_;
     LocalTensor<TW> wRaw_;
