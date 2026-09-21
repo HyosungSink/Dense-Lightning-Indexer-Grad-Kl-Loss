@@ -36,3 +36,6 @@ logs/
 /docs/official_mock_workflow.md
 /docs/performance_plan.md
 /docs/experiments/
+
+# Local optimization workspace (experiment records, tools, runs)
+/optimization/
