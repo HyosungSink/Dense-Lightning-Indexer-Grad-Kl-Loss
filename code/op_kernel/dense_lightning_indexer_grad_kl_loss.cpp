@@ -307,11 +307,32 @@ private:
         }
     }
 
-    __aicore__ inline void LoadQiAll(uint32_t b, uint32_t row) {
+    // 前奏中只发起、不等待（与其它搬运共享一次 MTE2 等待）
+    __aicore__ inline void IssueQiFirst(uint32_t b, uint32_t row) {
+        if (nidx_ > QI_STAGE_ROWS) {
+            return;
+        }
+        const uint64_t base = (static_cast<uint64_t>(b) * s1_ + row) * nidx_ * dim_;
+        const uint64_t elems = static_cast<uint64_t>(nidx_) * dim_;
+        if constexpr (sizeof(T) == 4u) {
+            IssueRows(queryIndexGm_, base, elems, qiF_);
+        } else {
+            IssueRows(queryIndexGm_, base, elems, qiStage_);
+        }
+    }
+
+    __aicore__ inline void LoadQiAll(uint32_t b, uint32_t row, bool firstIssued = false) {
         const uint64_t base = (static_cast<uint64_t>(b) * s1_ + row) * nidx_ * dim_;
         if constexpr (sizeof(T) == 4u) {
+            if (firstIssued) {
+                return;
+            }
             LoadRows(queryIndexGm_, base, nidx_, qiF_);
         } else {
+            if (firstIssued) {
+                Cast(qiF_, qiStage_, RoundMode::CAST_NONE, nidx_ * dimPad_);
+                return;
+            }
             // 分块载入并转 fp32，避免常驻一块 (nidx, dimPad) 的低精度缓冲
             for (uint32_t i0 = 0; i0 < nidx_; i0 += QI_STAGE_ROWS) {
                 const uint32_t rows = MinU32(QI_STAGE_ROWS, nidx_ - i0);
@@ -752,11 +773,16 @@ private:
         IssueRows(keyGm_, (static_cast<uint64_t>(b) * s2_) * n1_ * dim_,
                   static_cast<uint64_t>(firstRows) * n1_ * dim_, kT_);
         IssueKiAll(b);
+        const bool qiFirst = (nidx_ <= QI_STAGE_ROWS);
+        if (qiFirst) {
+            IssueQiFirst(b, row);
+        }
         SyncMte2ToVec();
         FinishWeights();
-        FinishKiAll();
-        LoadQiAll(b, row);
+        // 主注意力只需要 q/k：先算分数，再做 qi/ki 的精度转换，缩短关键路径
         ComputeScores(b, vis);
+        LoadQiAll(b, row, qiFirst);
+        FinishKiAll();
         ComputeTarget(vis);
         ComputeSimilarity(b, vis);
         ComputeLogits(vis);
