@@ -395,16 +395,19 @@ private:
             PipeBarrier<PIPE_V>();
             if (nPieces == 1u) {
                 WholeReduceSum<float>(tgt_[j], sc_[j * n1Pad_], MaskOf(n1_, 0), 1, 1, 1, 1);
-            } else {
-                WholeReduceSum<float>(part_, sc_[j * n1Pad_], MaskOf(n1_, 0), 1, 1, 1, 1);
-                for (uint32_t p = 1; p < nPieces; ++p) {
+                continue;
+            }
+            {
+                for (uint32_t p = 0; p < nPieces; ++p) {
                     WholeReduceSum<float>(part_[p * 8], sc_[j * n1Pad_ + p * 64u], MaskOf(n1_, p), 1,
                                           1, 1, 1);
-                    PipeBarrier<PIPE_V>();
-                    Add(part_, part_, part_[p * 8], 8);
                 }
                 PipeBarrier<PIPE_V>();
-                Adds(tgt_[j], part_, 0.0f, 1);
+                WholeReduceSum<float>(part_, part_, nPieces, 1, 1, 1, 1);
+                PipeBarrier<PIPE_V>();
+                tgt_.SetValue(j, ReadScalar(part_));
+                SetFlag<HardEvent::S_V>(EV_S_V);
+                WaitFlag<HardEvent::S_V>(EV_S_V);
             }
         }
         PipeBarrier<PIPE_V>();

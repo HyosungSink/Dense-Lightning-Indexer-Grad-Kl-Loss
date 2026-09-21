@@ -147,7 +147,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
     const uint32_t n1Pad = AlignUp(n1, 8u);
     const uint32_t nidxPad = AlignUp(nidx, 8u);
     Choice choice;
-    const uint32_t headCandidates[] = {16u, 8u, 4u, 2u, 1u};
+    const uint32_t headCandidates[] = {32u, 16u, 8u, 4u, 2u, 1u};
     for (uint32_t hbRaw : headCandidates) {
         const uint32_t hb = std::min(hbRaw, n1);
         const DliglUbLayout base =
