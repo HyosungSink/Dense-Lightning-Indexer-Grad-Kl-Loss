@@ -154,9 +154,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
     // ki 缓存优先取 min(s2, 8) 行；UB 放不下时退化为不缓存（逐 key 载入），保证通用性
     const uint32_t kiCacheCandidates[] = {
         std::min(s2, 8u), 4u, 2u, 1u, 0u};
-    // 头块优先取大：向量指令条数与 (n1/headBlock) 成正比；A2 上向量流水延迟受限，
-    // 更宽的指令（repeat=headBlock）优于多次窄指令。
-    const uint32_t headCandidates[] = {128u, 64u, 32u, 16u, 8u, 4u, 2u, 1u};
+    const uint32_t headCandidates[] = {32u, 16u, 8u, 4u, 2u, 1u};
     const uint32_t keyElemBytes = (inputBytes == 4u) ? 4u : 2u;
     const uint32_t keyRowBytes = n1 * dimPad * keyElemBytes;
     for (uint32_t cacheRaw : kiCacheCandidates) {

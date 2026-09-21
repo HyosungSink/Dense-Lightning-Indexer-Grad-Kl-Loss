@@ -163,13 +163,6 @@ private:
     __aicore__ inline uint32_t MinU32(uint32_t a, uint32_t b) const { return a < b ? a : b; }
     __aicore__ inline uint32_t Align8(uint32_t value) const { return (value + 7u) & ~7u; }
     __aicore__ inline uint32_t PiecesOf(uint32_t width) const { return (width + 63u) / 64u; }
-    // 与 UB 布局中 part_ 容量保持一致（见 DliglComputeUbLayout）
-    __aicore__ inline uint32_t PartElems() const {
-        uint32_t value = ((dimPad_ + 63u) / 64u) * Align8(n1_ > nidx_ ? n1_ : nidx_);
-        if (value < 64u) return 64u;
-        if (value > 2048u) return 2048u;
-        return value;
-    }
     __aicore__ inline uint32_t MaskOf(uint32_t width, uint32_t piece) const {
         const uint32_t left = width - piece * 64u;
         return left > 64u ? 64u : left;
@@ -494,33 +487,6 @@ private:
         Duplicate(tgt_, 0.0f, visPad_);   // padding 保持 0，便于按 visPad 做运算
         Duplicate(maxVec_, -3.0e38f, n1Pad_);
         const uint32_t nPieces = PiecesOf(n1_);
-        const uint8_t nStride = static_cast<uint8_t>(n1Pad_ / FP32_PER_BLOCK);
-        // 整块路径：repeat=vis 一次覆盖所有 key，省掉逐 key 指令与逐 key 标量回读。
-        // 需要 part_ 能容纳 nPieces*vis 个中间结果，否则退回逐 key 路径。
-        if (nPieces * visPad_ <= PartElems()) {
-            for (uint32_t p = 0; p < nPieces; ++p) {
-                BinaryRepeatParams mxParams{1, 1, 1, 0, nStride, 0};
-                Max(maxVec_[p * 64u], sc_[p * 64u], maxVec_[p * 64u], MaskOf(n1_, p),
-                    static_cast<uint8_t>(vis), mxParams);
-            }
-            for (uint32_t p = 0; p < nPieces; ++p) {
-                BinaryRepeatParams subParams{1, 1, 1, nStride, nStride, 0};
-                Sub(sc_[p * 64u], sc_[p * 64u], maxVec_[p * 64u], MaskOf(n1_, p),
-                    static_cast<uint8_t>(vis), subParams);
-                UnaryRepeatParams expParams{1, 1, nStride, nStride};
-                Exp(sc_[p * 64u], sc_[p * 64u], MaskOf(n1_, p), static_cast<uint8_t>(vis),
-                    expParams);
-                WholeReduceSum<float>(part_[p * vis], sc_[p * 64u], MaskOf(n1_, p),
-                                      static_cast<int32_t>(vis), 1, 1, nStride);
-            }
-            for (uint32_t p = 1; p < nPieces; ++p) {
-                Add(part_, part_, part_[p * vis], vis);
-            }
-            Adds(tgt_, part_, 0.0f, vis);
-            const float total = VecSum(tgt_, vis);
-            Muls(tgt_, tgt_, 1.0f / total, vis);
-            return;
-        }
         for (uint32_t j = 0; j < vis; ++j) {
             for (uint32_t p = 0; p < nPieces; ++p) {
                 Max(maxVec_[p * 64u], maxVec_[p * 64u], sc_[j * n1Pad_ + p * 64u], MaskOf(n1_, p));
