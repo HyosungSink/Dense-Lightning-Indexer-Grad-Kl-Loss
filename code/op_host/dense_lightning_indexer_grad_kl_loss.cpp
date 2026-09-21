@@ -12,7 +12,7 @@
 namespace optiling {
 namespace {
 constexpr uint32_t UB_TOTAL_BYTES = 192u * 1024u;
-constexpr uint32_t UB_RESERVE_BYTES = 8u * 1024u;
+constexpr uint32_t UB_RESERVE_BYTES = 12u * 1024u;
 constexpr uint64_t WS_LIMIT_BYTES = 384ull * 1024ull * 1024ull;
 // 单核工作量阈值：低于该规模时同步开销大于并行收益，直接用单核。
 constexpr uint64_t SINGLE_CORE_MACS = 120000ull;
@@ -38,10 +38,7 @@ inline uint32_t DimOf(const gert::Shape &shape, size_t index, uint32_t fallback)
 
 struct Choice {
     uint32_t headBlock = 1;
-    uint32_t keyChunk = 1;
-    uint32_t simPitch = 8;
     uint32_t dkRows = 0;
-    uint32_t storeSim = 1;
     DliglUbLayout layout{};
     bool valid = false;
 };
@@ -114,9 +111,13 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
     const float *scalePtr = attrs != nullptr ? attrs->GetFloat(0) : nullptr;
     const float scale = scalePtr != nullptr ? *scalePtr : 0.08838834764831845f;
 
-    const uint32_t dimPad = AlignUp(dim, 8u);
+    const uint32_t padUnit = std::max(8u, 32u / inputBytes);
+    const uint32_t dimPad = AlignUp(dim, padUnit);
+    // bf16 输入：向量乘加不支持 bf16，需要一块 T 暂存做精度转换
+    // 该平台向量指令不支持 bf16 乘加、也不支持 bf16->half 转换，bf16 组合不下发。
+    const uint32_t stageElems = 0u;
     const uint32_t visPad = std::max(AlignUp(s2, 8u), 8u);
-    if (dimPad > MAX_PAD_ELEMS || visPad > MAX_PAD_ELEMS) {
+    if (dimPad > MAX_PAD_ELEMS || visPad > MAX_PAD_ELEMS || n1 > 255u || nidx > 255u) {
         return ge::GRAPH_FAILED;
     }
 
@@ -143,45 +144,27 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
     }
 
     // ---- UB 切分搜索 ----
+    const uint32_t n1Pad = AlignUp(n1, 8u);
+    const uint32_t nidxPad = AlignUp(nidx, 8u);
     Choice choice;
     const uint32_t headCandidates[] = {16u, 8u, 4u, 2u, 1u};
-    const uint32_t chunkCandidates[] = {64u, 32u, 16u, 8u, 4u, 2u, 1u};
-    const uint32_t storeCandidates[] = {1u, 0u};
-    for (uint32_t storeSim : storeCandidates) {
-        for (uint32_t hbRaw : headCandidates) {
-            const uint32_t hb = std::min(hbRaw, n1);
-            for (uint32_t kcRaw : chunkCandidates) {
-                const uint32_t kc = std::min(kcRaw, std::max(1u, s2));
-                const uint32_t simPitch = AlignUp(kc, 8u);
-                const uint32_t simCols = (storeSim != 0u) ? visPad : simPitch;
-                if (storeSim != 0u && static_cast<uint64_t>(nidx) * simCols > 32768u) {
-                    continue;  // 相似度常驻过大，改用重算路径
-                }
-                const DliglUbLayout base = DliglComputeUbLayout(hb, kc, nidx, dimPad, visPad, simCols,
-                                                                0u, inputBytes, weightBytes);
-                if (base.totalBytes > ubBudget) {
-                    continue;
-                }
-                const uint32_t remain = ubBudget - base.totalBytes;
-                uint32_t dkRows = std::min(s2, remain / (dimPad * 4u));
-                const DliglUbLayout probe = DliglComputeUbLayout(hb, kc, nidx, dimPad, visPad, simCols,
-                                                                 dkRows, inputBytes, weightBytes);
-                if (probe.totalBytes <= ubBudget) {
-                    choice.headBlock = hb;
-                    choice.keyChunk = kc;
-                    choice.simPitch = simPitch;
-                    choice.dkRows = dkRows;
-                    choice.storeSim = storeSim;
-                    choice.layout = probe;
-                    choice.valid = true;
-                    break;
-                }
-            }
-            if (choice.valid) {
-                break;
-            }
+    for (uint32_t hbRaw : headCandidates) {
+        const uint32_t hb = std::min(hbRaw, n1);
+        const DliglUbLayout base =
+            DliglComputeUbLayout(hb, n1, nidx, dimPad, visPad, n1Pad, nidxPad, 0u, inputBytes,
+                                 weightBytes, stageElems);
+        if (base.totalBytes > ubBudget) {
+            continue;
         }
-        if (choice.valid) {
+        const uint32_t remain = ubBudget - base.totalBytes;
+        const uint32_t dkRows = std::min(s2, remain / (dimPad * 4u));
+        const DliglUbLayout probe =
+            DliglComputeUbLayout(hb, n1, nidx, dimPad, visPad, n1Pad, nidxPad, dkRows, inputBytes,
+                                 weightBytes, stageElems);
+        if (probe.totalBytes <= ubBudget) {
+            choice.headBlock = hb;
+            choice.dkRows = dkRows;
+            choice.valid = true;
             break;
         }
     }
@@ -199,8 +182,12 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
         needPartial != 0u ? static_cast<uint64_t>(s2) * dimPad : 0ull;
 
     uint64_t userFloats = dkPartialElems * taskCount;
-    const uint64_t lossOffset = userFloats;
+    // 与系统 workspace（SyncAll 标志）保持安全距离
+    constexpr uint64_t WS_GUARD_FLOATS = 8192u;
+    uint64_t lossOffset = userFloats;
     if (blockDim > 1u) {
+        userFloats += WS_GUARD_FLOATS;
+        lossOffset = userFloats;
         userFloats += taskCount;
     }
     const uint64_t userBytes = userFloats * 4ull;
@@ -227,15 +214,15 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
     tiling->rowsPerTask = rowsPerTask;
     tiling->blocksPerBatch = blocksPerBatch;
     tiling->taskCount = taskCount;
+    tiling->n1Pad = n1Pad;
+    tiling->nidxPad = nidxPad;
     tiling->headBlock = choice.headBlock;
-    tiling->keyChunk = choice.keyChunk;
-    tiling->simPitch = choice.simPitch;
     tiling->dkRows = choice.dkRows;
-    tiling->storeSim = choice.storeSim;
     tiling->splitDk = splitDk;
     tiling->dkPartialElems = static_cast<uint32_t>(dkPartialElems);
     tiling->lossOffset = static_cast<uint32_t>(lossOffset);
     tiling->weightsFp32 = weightsFp32;
+    tiling->stageElems = stageElems;
     tiling->blockDimUsed = blockDim;
     tiling->scale = scale;
 
@@ -260,40 +247,40 @@ public:
         // dtype 组合：fp16/bf16/fp32 输入，weights 允许 fp16/bf16/fp32，loss 恒为 float32。
         this->Input("query")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_BF16, ge::DT_BF16, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Input("key")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_BF16, ge::DT_BF16, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Input("query_index")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_BF16, ge::DT_BF16, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Input("key_index")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_BF16, ge::DT_BF16, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Input("weights")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_BF16, ge::DT_FLOAT, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Output("d_query_index")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_BF16, ge::DT_BF16, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Output("d_key_index")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_BF16, ge::DT_BF16, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Output("d_weights")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_BF16, ge::DT_FLOAT, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Output("loss")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Attr("scale_value").AttrType(OPTIONAL).Float(0.08838834764831845f);
         this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
         this->AICore()
