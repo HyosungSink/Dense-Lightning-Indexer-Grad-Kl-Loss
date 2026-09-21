@@ -23,6 +23,7 @@ struct DenseLightningIndexerGradKlLossTilingData {
     uint32_t dkRows;          // UB 中 dk 累加器 key 行数
     uint32_t splitDk;         // 1: 需要跨任务归约 dKeyIndex
     uint32_t dkPartialElems;  // 每任务 dk 部分和元素数（0 表示不需要）
+    uint32_t dkOffset;        // workspace 中 dk 部分和起始浮点偏移
     uint32_t lossOffset;      // workspace 中 loss 部分和偏移
     uint32_t weightsFp32;     // 1: weights 为 float32
     uint32_t stageElems;      // bf16 输入时的 T 暂存元素数（0 表示不需要）

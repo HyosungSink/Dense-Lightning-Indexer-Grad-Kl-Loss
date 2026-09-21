@@ -127,8 +127,10 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
     const uint64_t rowsTotal = static_cast<uint64_t>(batch) * s1;
 
     uint32_t rowsPerTask = 1u;
-    uint32_t blocksPerBatch = 1u;
-    uint32_t taskCount = static_cast<uint32_t>(rowsTotal);
+    // blocksPerBatch 必须与 rowsPerTask 自洽：同一 batch 有多个任务时必须走 partial + 归约，
+    // 否则各任务会各自写整段 dk 而互相覆盖。
+    uint32_t blocksPerBatch = CeilDiv(s1, rowsPerTask);
+    uint32_t taskCount = batch * blocksPerBatch;
     if (macs > SINGLE_CORE_MACS && rowsTotal > 1u) {
         uint32_t cores = static_cast<uint32_t>(std::min<uint64_t>(static_cast<uint64_t>(aivNum), rowsTotal));
         uint32_t perBatchBlocks = cores / batch;
@@ -181,14 +183,15 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
     const uint64_t dkPartialElems =
         needPartial != 0u ? static_cast<uint64_t>(s2) * dimPad : 0ull;
 
-    uint64_t userFloats = dkPartialElems * taskCount;
-    // 与系统 workspace（SyncAll 标志）保持安全距离
-    constexpr uint64_t WS_GUARD_FLOATS = 8192u;
-    uint64_t lossOffset = userFloats;
+    // 与系统 workspace（SyncAll 标志/屏障）保持安全距离：所有用户数据都从 guard 之后开始
+    constexpr uint64_t WS_GUARD_FLOATS = 16384u;
+    uint64_t userFloats = WS_GUARD_FLOATS;
+    const uint64_t dkOffset = userFloats;
+    userFloats += dkPartialElems * taskCount;
+    const uint64_t lossOffset = userFloats;
+    const uint64_t lossSlots = (taskCount < 8u) ? 8ull : (static_cast<uint64_t>(taskCount) + 7ull) / 8ull * 8ull;
     if (blockDim > 1u) {
-        userFloats += WS_GUARD_FLOATS;
-        lossOffset = userFloats;
-        userFloats += taskCount;
+        userFloats += lossSlots;
     }
     const uint64_t userBytes = userFloats * 4ull;
     if (userBytes > WS_LIMIT_BYTES) {
@@ -220,6 +223,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
     tiling->dkRows = choice.dkRows;
     tiling->splitDk = splitDk;
     tiling->dkPartialElems = static_cast<uint32_t>(dkPartialElems);
+    tiling->dkOffset = static_cast<uint32_t>(dkOffset);
     tiling->lossOffset = static_cast<uint32_t>(lossOffset);
     tiling->weightsFp32 = weightsFp32;
     tiling->stageElems = stageElems;
