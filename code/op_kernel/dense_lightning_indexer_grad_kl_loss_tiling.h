@@ -24,7 +24,8 @@ struct DenseLightningIndexerGradKlLossTilingData {
     uint32_t splitDk;         // 1: 需要跨任务归约 dKeyIndex
     uint32_t dkPartialElems;  // 每任务 dk 部分和元素数（0 表示不需要）
     uint32_t dkOffset;        // workspace 中 dk 部分和起始浮点偏移
-    uint32_t lossOffset;      // workspace 中 loss 部分和偏移
+    uint32_t lossOffset;      // workspace 中 loss 累加槽偏移（单个 32B 对齐槽）
+    uint32_t wsSysBytes;      // workspace 起始处系统保留字节数（用户数据偏移）
     uint32_t weightsFp32;     // 1: weights 为 float32
     uint32_t stageElems;      // bf16 输入时的 T 暂存元素数（0 表示不需要）
     uint32_t blockDimUsed;    // 启动核数
@@ -37,8 +38,8 @@ struct DliglUbLayout {
     uint32_t stageOff;   // bf16 输入时的原始暂存（T）
     uint32_t qTOff;      // (n1, dimPad) CT 整行 query
     uint32_t kTOff;      // (n1, dimPad) T  该 key 的整行 key
-    uint32_t prodTOff;   // (hb, dimPad) T  乘积（低精度）
-    uint32_t prodOff;    // (hb, dimPad) fp32 乘积
+    uint32_t prodTOff;   // (headBlock, dimPad) T  乘积（低精度）
+    uint32_t prodOff;    // (headBlock, dimPad) fp32 乘积（相似度按 headBlock 行分块复用）
     uint32_t qiStageOff; // (QI_STAGE, dimPad) T 分块暂存
     uint32_t qiFOff;     // (nidx, dimPad) fp32
     uint32_t kiTOff;     // dimPad T
@@ -47,6 +48,8 @@ struct DliglUbLayout {
     uint32_t uOff;       // (visPad, nidxPad) fp32 indexer 相似度（key-major, relu 后）
     uint32_t tgtOff;
     uint32_t shOff;
+    uint32_t lossAccOff;  // visPad：按 key 累积的 loss 项
+    uint32_t lzOff;       // 8：lnZ 暂存
     uint32_t predOff;
     uint32_t delOff;
     uint32_t dkOff;      // (dkRows, dimPad) fp32
@@ -122,6 +125,10 @@ DLIGL_UB_FN DliglUbLayout DliglComputeUbLayout(uint32_t headBlock, uint32_t n1, 
     off += ((visPad * 4u + 31u) & ~31u);
     l.shOff = off;
     off += ((visPad * 4u + 31u) & ~31u);
+    l.lossAccOff = off;
+    off += ((visPad * 4u + 31u) & ~31u);
+    l.lzOff = off;
+    off += ((64u * 4u + 31u) & ~31u);
     l.predOff = off;
     off += ((visPad * 4u + 31u) & ~31u);
     l.delOff = off;

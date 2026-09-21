@@ -183,13 +183,14 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
     const uint64_t dkPartialElems =
         needPartial != 0u ? static_cast<uint64_t>(s2) * dimPad : 0ull;
 
-    // 与系统 workspace（SyncAll 标志/屏障）保持安全距离：所有用户数据都从 guard 之后开始
-    constexpr uint64_t WS_GUARD_FLOATS = 16384u;
+    // 用户数据从 0 开始计数，实际地址在 kernel 侧整体加上系统保留区
+    constexpr uint64_t WS_GUARD_FLOATS = 0u;
     uint64_t userFloats = WS_GUARD_FLOATS;
     const uint64_t dkOffset = userFloats;
     userFloats += dkPartialElems * taskCount;
     const uint64_t lossOffset = userFloats;
-    const uint64_t lossSlots = (taskCount < 8u) ? 8ull : (static_cast<uint64_t>(taskCount) + 7ull) / 8ull * 8ull;
+    // 每个任务一个 32B 对齐槽（8 floats，仅第 0 个元素有效），避免非对齐 DataCopy
+    const uint64_t lossSlots = ((static_cast<uint64_t>(taskCount) + 7ull) / 8ull) * 8ull * 8ull;
     if (blockDim > 1u) {
         userFloats += lossSlots;
     }
@@ -225,6 +226,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
     tiling->dkPartialElems = static_cast<uint32_t>(dkPartialElems);
     tiling->dkOffset = static_cast<uint32_t>(dkOffset);
     tiling->lossOffset = static_cast<uint32_t>(lossOffset);
+    tiling->wsSysBytes = sysWorkspace;
     tiling->weightsFp32 = weightsFp32;
     tiling->stageElems = stageElems;
     tiling->blockDimUsed = blockDim;

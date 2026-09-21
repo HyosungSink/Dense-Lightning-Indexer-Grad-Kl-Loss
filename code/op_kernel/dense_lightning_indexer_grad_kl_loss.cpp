@@ -88,7 +88,7 @@ public:
         lossGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(loss), 1);
         const uint64_t wsElems = static_cast<uint64_t>(dkOffset_) +
                                  static_cast<uint64_t>(dkPartialElems_) * taskCount_ +
-                                 taskCount_ + 64u;
+                                 static_cast<uint64_t>(lossOffset_) + 64u;
         workspaceGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(workspace), wsElems);
 
         layout_ = DliglComputeUbLayout(headBlock_, n1_, nidx_, dimPad_, visPad_, n1Pad_, nidxPad_,
@@ -101,6 +101,8 @@ public:
         coreNum_ = static_cast<uint32_t>(GetBlockNum());
         totalLoss_ = 0.0f;
         Duplicate(scratch_[128], 1.0f, 64);
+        Duplicate(lz_, 1.0f, 64);
+        Duplicate(scratch_[384], 0.0f, 8);
         PipeBarrier<PIPE_V>();
         for (uint32_t task = coreIdx; task < taskCount_; task += coreNum_) {
             ProcessTask(task);
@@ -132,6 +134,8 @@ private:
         tgt_ = LocalTensor<float>(TPosition::VECCALC, layout_.tgtOff, visPad_);
         sh_ = LocalTensor<float>(TPosition::VECCALC, layout_.shOff, visPad_);
         pred_ = LocalTensor<float>(TPosition::VECCALC, layout_.predOff, visPad_);
+        lossAcc_ = LocalTensor<float>(TPosition::VECCALC, layout_.lossAccOff, visPad_);
+        lz_ = LocalTensor<float>(TPosition::VECCALC, layout_.lzOff, 64u);
         del_ = LocalTensor<float>(TPosition::VECCALC, layout_.delOff, visPad_);
         dkAcc_ = LocalTensor<float>(TPosition::VECCALC, layout_.dkOff, dkRows_ * dimPad_);
         dkRow_ = LocalTensor<float>(TPosition::VECCALC, layout_.dkRowOff, dimPad_);
@@ -429,6 +433,8 @@ private:
         const uint32_t redWidth =
             (pieces > 1u) ? (dim_ < FP32_PER_REPEAT ? dim_ : FP32_PER_REPEAT) : dim_;
         const uint8_t fStride = static_cast<uint8_t>(dimPad_ / FP32_PER_BLOCK);
+        // prod_ 只有 headBlock 行容量，索引头按 headBlock 分块，避免 nidx > headBlock 越界
+        const uint32_t chunk = headBlock_ == 0u ? 1u : headBlock_;
         for (uint32_t j = 0; j < vis; ++j) {
             LoadKiRow(b, j);
             if constexpr (sizeof(T) == 4u) {
@@ -438,23 +444,26 @@ private:
                 Cast(kiF_, kiT_, RoundMode::CAST_NONE, dimPad_);
             }
             PipeBarrier<PIPE_V>();
-            for (uint32_t p = 0; p < pieces; ++p) {
-                const uint32_t left = dim_ - p * FP32_PER_REPEAT;
-                const uint32_t mask = left > FP32_PER_REPEAT ? FP32_PER_REPEAT : left;
-                BinaryRepeatParams params{1, 1, 1, fStride, fStride, 0};
-                Mul(prod_[p * FP32_PER_REPEAT], qiF_[p * FP32_PER_REPEAT],
-                    kiF_[p * FP32_PER_REPEAT], mask, static_cast<uint8_t>(nidx_), params);
-            }
-            if (pieces > 1u) {
-                BinaryRepeatParams addParams{1, 1, 1, fStride, fStride, fStride};
-                for (uint32_t p = 1; p < pieces; ++p) {
-                    Add(prod_, prod_, prod_[p * FP32_PER_REPEAT], FP32_PER_REPEAT,
-                        static_cast<uint8_t>(nidx_), addParams);
+            for (uint32_t i0 = 0; i0 < nidx_; i0 += chunk) {
+                const uint32_t hc = MinU32(chunk, nidx_ - i0);
+                for (uint32_t p = 0; p < pieces; ++p) {
+                    const uint32_t left = dim_ - p * FP32_PER_REPEAT;
+                    const uint32_t mask = left > FP32_PER_REPEAT ? FP32_PER_REPEAT : left;
+                    BinaryRepeatParams params{1, 1, 1, fStride, fStride, 0};
+                    Mul(prod_[p * FP32_PER_REPEAT], qiF_[i0 * dimPad_ + p * FP32_PER_REPEAT],
+                        kiF_[p * FP32_PER_REPEAT], mask, static_cast<uint8_t>(hc), params);
                 }
+                if (pieces > 1u) {
+                    BinaryRepeatParams addParams{1, 1, 1, fStride, fStride, fStride};
+                    for (uint32_t p = 1; p < pieces; ++p) {
+                        Add(prod_, prod_, prod_[p * FP32_PER_REPEAT], FP32_PER_REPEAT,
+                            static_cast<uint8_t>(hc), addParams);
+                    }
+                }
+                PipeBarrier<PIPE_V>();
+                ReduceRowsFp32(u_[j * nidxPad_ + i0], prod_, hc, redWidth, dimPad_);
+                PipeBarrier<PIPE_V>();
             }
-            PipeBarrier<PIPE_V>();
-            ReduceRowsFp32(u_[j * nidxPad_], prod_, nidx_, redWidth, dimPad_);
-            PipeBarrier<PIPE_V>();
             Maxs(u_[j * nidxPad_], u_[j * nidxPad_], 0.0f, nidx_);  // ReLU
         }
         PipeBarrier<PIPE_V>();
@@ -512,7 +521,17 @@ private:
         PipeBarrier<PIPE_V>();
         Sub(scratch_, scratch_, scratch_[64], width);
         PipeBarrier<PIPE_V>();
-        rowLoss_ += VecSum(scratch_, width) + ScalarLn(normalizer);
+        // 逐 key 项按向量累积，lnZ 只写第 0 个元素：整个任务只在末尾做一次归约
+        Add(lossAcc_, lossAcc_, scratch_, width);
+        PipeBarrier<PIPE_V>();
+        lz_.SetValue(0, normalizer);
+        SetFlag<HardEvent::S_V>(EV_S_V);
+        WaitFlag<HardEvent::S_V>(EV_S_V);
+        PipeBarrier<PIPE_V>();
+        Ln(lz_, lz_, 8);
+        PipeBarrier<PIPE_V>();
+        Add(lossAcc_, lossAcc_, lz_, 8);
+        PipeBarrier<PIPE_V>();
         (void)vis;
     }
 
@@ -626,11 +645,11 @@ private:
         const uint32_t rowStart = blk * rowsPerTask_;
         const uint32_t rowEnd = MinU32(s1_, rowStart + rowsPerTask_);
         rowLoss_ = 0.0f;
+        Duplicate(lossAcc_, 0.0f, visPad_);
+        PipeBarrier<PIPE_V>();
         if (coreNum_ > 1u) {
-            Duplicate(scratch_[384], 0.0f, 8);
-            PipeBarrier<PIPE_V>();
             SyncVecToMte3();
-            DataCopy(workspaceGm_[lossOffset_ + task], scratch_[384], 8);
+            DataCopy(workspaceGm_[lossOffset_ + static_cast<uint64_t>(task) * 8u], scratch_[384], 8);
             SyncMte3Done();
         }
         if (dkRows_ >= s2_) {
@@ -650,13 +669,14 @@ private:
         for (uint32_t row = rowStart; row < rowEnd; ++row) {
             ProcessRow(b, row, VisibleOf(row));
         }
+        rowLoss_ = VecSum(lossAcc_, visPad_);
         if (coreNum_ == 1u) {
             totalLoss_ += rowLoss_;
         } else {
             scratch_[384].SetValue(0, rowLoss_);
             SetFlag<HardEvent::S_MTE3>(EV_S_MTE3);
             WaitFlag<HardEvent::S_MTE3>(EV_S_MTE3);
-            DataCopy(workspaceGm_[lossOffset_ + task], scratch_[384], 8);
+            DataCopy(workspaceGm_[lossOffset_ + static_cast<uint64_t>(task) * 8u], scratch_[384], 8);
             SyncMte3Done();
         }
         WriteDk(b);
@@ -717,12 +737,11 @@ private:
         }
         if (coreIdx == 0u) {
             float total = 0.0f;
-            for (uint32_t t = 0; t < taskCount_; t += 64u) {
-                const uint32_t count = MinU32(64u, taskCount_ - t);
+            for (uint32_t t = 0; t < taskCount_; ++t) {
                 SyncVecDone();
-                DataCopy(prod_, workspaceGm_[lossOffset_ + t], Align8(count));
+                DataCopy(prod_, workspaceGm_[lossOffset_ + static_cast<uint64_t>(t) * 8u], 8);
                 SyncMte2ToVec();
-                total += VecSum(prod_, count);
+                total += VecSum(prod_, 8);
             }
             lossGm_.SetValue(0, total);
         }
@@ -779,6 +798,7 @@ private:
     LocalTensor<T> stageRaw_, outT_;
     LocalTensor<float> prod_, qiF_, kiF_, sc_, u_, tgt_, sh_, pred_, del_, dkAcc_, dkRow_, dq_;
     LocalTensor<float> maxVec_, dblk_, mblk_, part_, w_, wb_, dw_, dwRow_, scratch_;
+    LocalTensor<float> lossAcc_, lz_;
     LocalTensor<TW> wRaw_;
 
     GlobalTensor<T> queryGm_, keyGm_, queryIndexGm_, keyIndexGm_;
