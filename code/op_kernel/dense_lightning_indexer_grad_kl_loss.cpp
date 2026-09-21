@@ -397,18 +397,21 @@ private:
                 WholeReduceSum<float>(tgt_[j], sc_[j * n1Pad_], MaskOf(n1_, 0), 1, 1, 1, 1);
                 continue;
             }
-            {
-                for (uint32_t p = 0; p < nPieces; ++p) {
-                    WholeReduceSum<float>(part_[p * 8], sc_[j * n1Pad_ + p * 64u], MaskOf(n1_, p), 1,
-                                          1, 1, 1);
-                }
-                PipeBarrier<PIPE_V>();
-                WholeReduceSum<float>(part_, part_, nPieces, 1, 1, 1, 1);
-                PipeBarrier<PIPE_V>();
-                tgt_.SetValue(j, ReadScalar(part_));
-                SetFlag<HardEvent::S_V>(EV_S_V);
-                WaitFlag<HardEvent::S_V>(EV_S_V);
+            // n1 > 64：各 64 头分片分别归约后按标量相加（分片结果间隔 8 个槽位）
+            for (uint32_t p = 0; p < nPieces; ++p) {
+                WholeReduceSum<float>(part_[p * 8], sc_[j * n1Pad_ + p * 64u], MaskOf(n1_, p), 1,
+                                      1, 1, 1);
             }
+            PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::V_S>(EV_V_S);
+            WaitFlag<HardEvent::V_S>(EV_V_S);
+            float pieceSum = 0.0f;
+            for (uint32_t p = 0; p < nPieces; ++p) {
+                pieceSum += part_.GetValue(p * 8);
+            }
+            tgt_.SetValue(j, pieceSum);
+            SetFlag<HardEvent::S_V>(EV_S_V);
+            WaitFlag<HardEvent::S_V>(EV_S_V);
         }
         PipeBarrier<PIPE_V>();
         const float total = VecSum(tgt_, vis);
