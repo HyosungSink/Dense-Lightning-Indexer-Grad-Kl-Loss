@@ -582,7 +582,7 @@ private:
         }
     }
 
-    __aicore__ inline void WriteRowOutputs(uint32_t b, uint32_t row) {
+    __aicore__ inline void StoreRowOut(uint32_t b, uint32_t row) {
         const uint64_t dqBase = (static_cast<uint64_t>(b) * s1_ + row) * nidx_ * dim_;
         const uint64_t dwBase = (static_cast<uint64_t>(b) * s1_ + row) * nidx_;
         SyncVecToMte3();
@@ -657,7 +657,7 @@ private:
             Duplicate(dq_, 0.0f, nidx_ * dimPad_);
             Duplicate(dw_, 0.0f, nidx_);
             PipeBarrier<PIPE_V>();
-            WriteRowOutputs(b, row);
+            StoreRowOut(b, row);
             return;
         }
         LoadWeights(b, row);
@@ -669,7 +669,7 @@ private:
         ComputeLogits(vis);
         SoftmaxAndLoss(vis);
         ComputeGradients(b, vis);
-        WriteRowOutputs(b, row);
+        StoreRowOut(b, row);
 
     }
 
