@@ -147,6 +147,7 @@ private:
         del_ = LocalTensor<float>(TPosition::VECCALC, layout_.delOff, visPad_);
         dkAcc_ = LocalTensor<float>(TPosition::VECCALC, layout_.dkOff, dkRows_ * dimPad_);
         dkRow_ = LocalTensor<float>(TPosition::VECCALC, layout_.dkRowOff, dimPad_);
+        dkOutT_ = LocalTensor<T>(TPosition::VECCALC, layout_.dkOutTOff, dkRows_ * dimPad_);
         dq_ = LocalTensor<float>(TPosition::VECCALC, layout_.dqOff, nidx_ * dimPad_);
         maxVec_ = LocalTensor<float>(TPosition::VECCALC, layout_.maxOff, n1Pad_);
         dblk_ = LocalTensor<float>(TPosition::VECCALC, layout_.dblkOff, visPad_ * 8u);
@@ -690,7 +691,6 @@ private:
             Cast(wRaw_, dw_, RoundMode::CAST_NONE, nidx_);
             SyncVecToMte3();
             DataCopyPad(dWeightsGm_[dwBase], wRaw_, wParams);
-            SyncMte3Done();
         }
     }
 
@@ -766,28 +766,43 @@ private:
 
     }
 
+    // dKeyIndex 写回：整块 Cast + 一次同步（原先每行一次 Cast/同步，是核内同步数最多的路径）。
     __aicore__ inline void WriteDk(uint32_t b) {
         if (dkRows_ < s2_) {
             return;
         }
-        SyncVecToMte3();
-        for (uint32_t j = 0; j < s2_; ++j) {
-            if (dkPartialElems_ > 0u) {
-                DataCopy(workspaceGm_[static_cast<uint64_t>(dkOffset_) + static_cast<uint64_t>(taskBase_) * dkPartialElems_ +
+        if (dkPartialElems_ > 0u) {
+            SyncVecToMte3();
+            for (uint32_t j = 0; j < s2_; ++j) {
+                DataCopy(workspaceGm_[static_cast<uint64_t>(dkOffset_) +
+                                      static_cast<uint64_t>(taskBase_) * dkPartialElems_ +
                                       static_cast<uint64_t>(j) * dimPad_],
                          dkAcc_[j * dimPad_], dimPad_);
-            } else {
-                const uint64_t offset =
-                    static_cast<uint64_t>(b) * s2_ * dim_ + static_cast<uint64_t>(j) * dim_;
+            }
+            SyncMte3Done();
+            return;
+        }
+        const uint64_t offset = static_cast<uint64_t>(b) * s2_ * dim_;
+        const uint64_t elems = static_cast<uint64_t>(s2_) * dim_;
+        if constexpr (sizeof(CT) == 4u) {
+            SyncVecToMte3();
+            for (uint32_t j = 0; j < s2_; ++j) {
                 DataCopyExtParams params{1, static_cast<uint32_t>(dim_ * sizeof(T)), 0, 0, 0};
-                if constexpr (sizeof(CT) == 4u) {
-                    DataCopyPad(dKeyIndexGm_[offset], dkAcc_[j * dimPad_], params);
-                } else {
-                    Cast(outT_, dkAcc_[j * dimPad_], RoundMode::CAST_NONE, dimPad_);
-                    SyncVecToMte3();
-                    DataCopyPad(dKeyIndexGm_[offset], outT_, params);
-                    SyncMte3Done();
-                }
+                DataCopyPad(dKeyIndexGm_[offset + static_cast<uint64_t>(j) * dim_],
+                            dkAcc_[j * dimPad_], params);
+            }
+            SyncMte3Done();
+            return;
+        }
+        Cast(dkOutT_, dkAcc_, RoundMode::CAST_NONE, s2_ * dimPad_);
+        SyncVecToMte3();
+        if (BulkOk(offset, elems)) {
+            DataCopy(dKeyIndexGm_[offset], dkOutT_, static_cast<uint32_t>(elems));
+        } else {
+            for (uint32_t j = 0; j < s2_; ++j) {
+                DataCopyExtParams params{1, static_cast<uint32_t>(dim_ * sizeof(T)), 0, 0, 0};
+                DataCopyPad(dKeyIndexGm_[offset + static_cast<uint64_t>(j) * dim_],
+                            dkOutT_[j * dimPad_], params);
             }
         }
         SyncMte3Done();
@@ -856,7 +871,7 @@ private:
 
     LocalTensor<CT> qT_, kT_, prodT_, kiT_;
     LocalTensor<T> qiStage_, dqStage_, kiCacheT_;
-    LocalTensor<T> stageRaw_, outT_;
+    LocalTensor<T> stageRaw_, outT_, dkOutT_;
     LocalTensor<float> prod_, qiF_, kiF_, kiCache_, sc_, u_, tgt_, sh_, pred_, del_, dkAcc_, dkRow_, dq_;
     LocalTensor<float> maxVec_, dblk_, mblk_, part_, w_, wb_, dw_, dwRow_, scratch_;
     LocalTensor<float> lossAcc_, lz_;

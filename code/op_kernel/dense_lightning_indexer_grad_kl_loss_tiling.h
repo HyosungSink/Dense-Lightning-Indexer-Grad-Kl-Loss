@@ -58,6 +58,7 @@ struct DliglUbLayout {
     uint32_t delOff;
     uint32_t dkOff;      // (dkRows, dimPad) fp32
     uint32_t dkRowOff;   // dimPad fp32
+    uint32_t dkOutTOff;  // (dkRows, dimPad) T：dKeyIndex 写回的一次性转换暂存
     uint32_t dqOff;      // (nidx, dimPad) fp32
     uint32_t maxOff;     // n1Pad fp32
     uint32_t dblkOff;    // visPad*8 fp32
@@ -150,6 +151,10 @@ DLIGL_UB_FN DliglUbLayout DliglComputeUbLayout(uint32_t headBlock, uint32_t n1, 
     off += ((dkRows * dimPad * 4u + 31u) & ~31u);
     l.dkRowOff = off;
     off += ((dimPad * 4u + 31u) & ~31u);
+    l.dkOutTOff = off;
+    if (inputBytes != 4u) {
+        off += ((dkRows * dimPad * 2u + 31u) & ~31u);
+    }
     l.dqOff = off;
     off += ((nidx * dimPad * 4u + 31u) & ~31u);
     l.maxOff = off;
