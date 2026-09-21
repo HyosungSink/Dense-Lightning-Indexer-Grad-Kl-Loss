@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "category": "mock",
+  "description": "Seven fixed compact-ABI workloads. Inputs are generated from these specs; expected outputs are computed at run time.",
+  "abi": "compact_five_inputs",
+  "cases": [
+    {
+      "id": "mock_case_1",
+      "kind": "compact",
+      "shape": [
+        1,
+        1,
+        4,
+        32,
+        8,
+        64
+      ],
+      "pattern": "documented_example",
+      "seed": 42
+    },
+    {
+      "id": "mock_case_2",
+      "kind": "compact",
+      "shape": [
+        1,
+        1,
+        4,
+        32,
+        8,
+        64
+      ],
+      "pattern": "documented_example",
+      "seed": 42
+    },
+    {
+      "id": "mock_case_3",
+      "kind": "compact",
+      "shape": [
+        1,
+        1,
+        4,
+        32,
+        8,
+        128
+      ],
+      "pattern": "documented_example",
+      "seed": 42
+    },
+    {
+      "id": "mock_case_4",
+      "kind": "compact",
+      "shape": [
+        2,
+        1,
+        4,
+        32,
+        8,
+        128
+      ],
+      "seed": 118
+    },
+    {
+      "id": "mock_case_5",
+      "kind": "compact",
+      "shape": [
+        1,
+        2,
+        8,
+        64,
+        16,
+        128
+      ],
+      "causal": false,
+      "seed": 42
+    },
+    {
+      "id": "mock_case_6",
+      "kind": "compact",
+      "shape": [
+        1,
+        1,
+        4,
+        64,
+        32,
+        128
+      ],
+      "dtype": "float32",
+      "weights_dtype": "float32",
+      "seed": 42
+    },
+    {
+      "id": "mock_case_7",
+      "kind": "compact",
+      "shape": [
+        1,
+        1,
+        8,
+        128,
+        64,
+        128
+      ],
+      "seed": 42
+    }
+  ]
+}

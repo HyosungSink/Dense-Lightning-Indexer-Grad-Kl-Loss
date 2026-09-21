@@ -1,0 +1,184 @@
+# NPU架构版本3002<a name="ZH-CN_TOPIC_0000002346837454"></a>
+
+本节介绍\_\_NPU\_ARCH\_\_版本号为3002的硬件架构和其功能说明。对应的产品型号为：
+
+<!-- npu="310b" id1 -->
+-   Atlas 200I/500 A2 推理产品
+<!-- end id1 -->
+
+## 硬件架构图<a name="section129231322122015"></a>
+
+![](../../../../figures/tight_1911.png)
+
+## 计算单元<a name="section8171163594515"></a>
+
+**Cube计算单元和Vector计算单元同核部署**
+
+本架构中，Cube计算单元和Vector计算单元同核部署，共享同一个Scalar计算单元。
+
+**Vector计算单元**
+
+-   Vector计算单元的数据来源来自于Unified Buffer（UB），要求32字节对齐。
+
+**Cube计算单元**
+
+-   Cube计算单元可以访问的存储单元有L0A Buffer、L0B Buffer、L0C Buffer，其中L0A Buffer存储左矩阵，L0B Buffer存储右矩阵，L0C Buffer存储矩阵乘的结果和中间结果。
+
+## 存储单元<a name="section319585512210"></a>
+
+**获取存储单元的内存空间大小**
+
+开发者可以通过[平台信息获取](../../../../../api/Utils-API/platform_info/platform_info.md)接口查询各存储单元的内存空间大小。
+
+**各存储单元的最小访问粒度（对齐要求）**
+
+<a name="table12348145512210"></a>
+<table><thead align="left"><tr id="row3348175522218"><th class="cellrowborder" valign="top" width="7.5200000000000005%" id="mcps1.1.4.1.1"><p id="p1680716381143"><a name="p1680716381143"></a><a name="p1680716381143"></a>核</p>
+</th>
+<th class="cellrowborder" valign="top" width="46.22%" id="mcps1.1.4.1.2"><p id="p5348145515229"><a name="p5348145515229"></a><a name="p5348145515229"></a>存储单元</p>
+</th>
+<th class="cellrowborder" valign="top" width="46.26%" id="mcps1.1.4.1.3"><p id="p16348125520221"><a name="p16348125520221"></a><a name="p16348125520221"></a>对齐要求</p>
+</th>
+</tr>
+</thead>
+<tbody><tr id="row11348135516221"><td class="cellrowborder" valign="top" width="7.5200000000000005%" headers="mcps1.1.4.1.1 "><p id="p48071138245"><a name="p48071138245"></a><a name="p48071138245"></a>AIV</p>
+</td>
+<td class="cellrowborder" valign="top" width="46.22%" headers="mcps1.1.4.1.2 "><p id="p63481755122216"><a name="p63481755122216"></a><a name="p63481755122216"></a><span id="ph15348135502220"><a name="ph15348135502220"></a><a name="ph15348135502220"></a>UB</span></p>
+</td>
+<td class="cellrowborder" valign="top" width="46.26%" headers="mcps1.1.4.1.3 "><p id="p1634825512226"><a name="p1634825512226"></a><a name="p1634825512226"></a>32Byte对齐。</p>
+</td>
+</tr>
+<tr id="row1534865520225"><td class="cellrowborder" rowspan="6" valign="top" width="7.5200000000000005%" headers="mcps1.1.4.1.1 "><p id="p567812161851"><a name="p567812161851"></a><a name="p567812161851"></a>AIC</p>
+</td>
+<td class="cellrowborder" valign="top" width="46.22%" headers="mcps1.1.4.1.2 "><p id="p7349175582217"><a name="p7349175582217"></a><a name="p7349175582217"></a><span id="ph1234918559222"><a name="ph1234918559222"></a><a name="ph1234918559222"></a>L1 Buffer</span></p>
+</td>
+<td class="cellrowborder" valign="top" width="46.26%" headers="mcps1.1.4.1.3 "><p id="p2034975519227"><a name="p2034975519227"></a><a name="p2034975519227"></a>32Byte对齐。</p>
+</td>
+</tr>
+<tr id="row14349855162220"><td class="cellrowborder" valign="top" headers="mcps1.1.4.1.1 "><p id="p2349175522213"><a name="p2349175522213"></a><a name="p2349175522213"></a><span id="ph12349175572211"><a name="ph12349175572211"></a><a name="ph12349175572211"></a>L0A Buffer</span></p>
+</td>
+<td class="cellrowborder" valign="top" headers="mcps1.1.4.1.2 "><p id="p12349105510223"><a name="p12349105510223"></a><a name="p12349105510223"></a>512Byte对齐。</p>
+</td>
+</tr>
+<tr id="row83498556224"><td class="cellrowborder" valign="top" headers="mcps1.1.4.1.1 "><p id="p143491455162210"><a name="p143491455162210"></a><a name="p143491455162210"></a><span id="ph5349135515225"><a name="ph5349135515225"></a><a name="ph5349135515225"></a>L0B Buffer</span></p>
+</td>
+<td class="cellrowborder" valign="top" headers="mcps1.1.4.1.2 "><p id="p234945516225"><a name="p234945516225"></a><a name="p234945516225"></a>512Byte对齐。</p>
+</td>
+</tr>
+<tr id="row13491655162217"><td class="cellrowborder" valign="top" headers="mcps1.1.4.1.1 "><p id="p43494555226"><a name="p43494555226"></a><a name="p43494555226"></a><span id="ph17349155514229"><a name="ph17349155514229"></a><a name="ph17349155514229"></a>L0C Buffer</span></p>
+</td>
+<td class="cellrowborder" valign="top" headers="mcps1.1.4.1.2 "><p id="p14349125512220"><a name="p14349125512220"></a><a name="p14349125512220"></a>64Byte对齐。</p>
+</td>
+</tr>
+<tr id="row15518316118"><td class="cellrowborder" valign="top" headers="mcps1.1.4.1.1 "><p id="p13625119517"><a name="p13625119517"></a><a name="p13625119517"></a>BiasTable Buffer</p>
+</td>
+<td class="cellrowborder" valign="top" headers="mcps1.1.4.1.2 "><p id="p1462519119"><a name="p1462519119"></a><a name="p1462519119"></a>64Byte对齐。</p>
+</td>
+</tr>
+<tr id="row16156956113"><td class="cellrowborder" valign="top" headers="mcps1.1.4.1.1 "><p id="p126251896119"><a name="p126251896119"></a><a name="p126251896119"></a>Fixpipe Buffer</p>
+</td>
+<td class="cellrowborder" valign="top" headers="mcps1.1.4.1.2 "><p id="p5364111320919"><a name="p5364111320919"></a><a name="p5364111320919"></a>64Byte对齐。</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+**各存储单元推荐使用的数据排布格式**
+
+-   L0A Buffer、L0B Buffer和L0C Buffer推荐分别采用以下分形格式：
+
+    -   L0A Buffer：FRACTAL\_ZZ
+    -   L0B Buffer：FRACTAL\_ZN
+    -   L0C Buffer：FRACTAL\_NZ
+
+    这些格式针对矩阵乘法等计算密集型任务进行优化，可显著提升计算效率。
+
+-   L1 Buffer缓存推荐使用FRACTAL\_NZ格式。当L1 Buffer采用NZ格式时，数据搬运到L0A/L0B Buffer（需分别转换为ZZ和ZN格式）时，可降低格式转换开销。
+-   UB对数据格式没有要求。
+
+**解决存储单元的访问冲突，提升读写性能**
+
+当多个操作尝试同时访问UB同一个bank或者bank group时，可能会发生bank冲突，包括读写冲突、写写冲突、读读冲突，这种冲突会导致访问排队，降低性能。可以通过优化bank分配的方式来提升读写性能，具体信息请参考[避免UB的bank冲突](../../../../operator_practice/simd_operator_optimization/memory_access/avoid_ub_bank_conflict/avoid_ub_bank_conflict.md)章节。
+
+## 搬运单元<a name="section2819205515273"></a>
+
+**搬运时的对齐要求**
+
+由于搬运后的数据用于参与数据计算，因此对搬运数据大小有要求，搬运到UB的数据大小需要按照DataBlock对齐，其余存储单元的数据搬运必须按[分形要求](../../../../technical_appendix/concepts_and_terms/neural_networks_and_operators/data_layout.md)进行搬运。例如，数据从L1 Buffer搬运到L0A Buffer时，数据格式需要从NZ转换为ZZ格式，搬运数据的大小要按分形大小对齐，如果L1 Buffer的剩余大小不足1个分形，则硬件执行中会出现异常。
+
+**支持Fixpipe硬件化加速**
+
+Fixpipe是NPU将典型操作进行硬化的加速模块，位于AIC内部，配合Cube计算单元完成随路计算，主要功能如下：
+
+-   量化反量化：包括S322FP16、S322S32、S322S4、S322S8、S322S16、FP322FP16、FP322BF16、FP322S8、FP322S4、FP322FP32。
+-   Relu功能，包括ReLu、PReLu和Leaky ReLu等典型的激活函数。
+-   数据格式转换，包括：
+    -   通过Channel merge、Channel split可以实现分形大小的转换，保证输出到L1 Buffer/GM的分形满足诉求。
+    -   NZ2ND数据格式转换。
+
+![](../../../../figures/fixpipe_14.png)
+
+上图中，Channel merge支持S8、U8、S4和U4数据类型，而Channel split支持FP32数据类型。
+
+-   Channel merge（S8和U8数据类型）
+
+    对于转换为S8或U8的目标数据类型，分形矩阵通过硬件从16x16转换为16x32，如果输出通道数N是16的偶数倍，则N方向上每2个相邻的16x16分形矩阵将合并为1个16x32分形矩阵。如果N是16的奇数倍，则将通道1到通道（N–16）合并，最后16个通道保持未合并。
+
+    如下所示，目标数据类型为S8，M为32，N为48，首先将前2列16x16分形矩阵合并为一个16x32矩阵，然后将剩余的16x16分形矩阵直接移入L1 Buffer。
+
+    ![](../../../../figures/fixpipe_i8_1.png)
+
+-   Channel merge（S4和U4数据类型）
+
+    对于转换为S4或U4的目标数据类型，分形矩阵通过硬件从16x16转换为16x64，如果输出通道数N是64的倍数，则N方向上每4个相邻的16x16分形矩阵将合并为1个16x64分形矩阵。
+
+    例如，这里目标数据类型为S4，M为32，N为64，首先将第1行16x16分形矩阵合并为一个16x64矩阵，然后将第2行16x16分形矩阵也合并。
+
+    在这种情况下，N的配置必须是64的倍数。
+
+    ![](../../../../figures/fixpipe_i4_1.png)
+
+-   FP32 Channel split：
+
+    对于目标类型为FP32，分形矩阵可以通过硬件从16x16转换为16x8，如果开启Channel split，则每个16x16分形矩阵将被分裂为2个16x8分形矩阵。
+
+    如下图所示，这里的目标数据类型是FP32，M是64，N是32，它将被拆分为16个16x8的分形。
+
+    ![](../../../../figures/fixpipe_f32_1.png)
+
+## 同步控制<a name="section15421223142815"></a>
+
+-   核内同步
+
+    由于AI Core内部的执行单元（如MTE2搬运单元、Vector计算单元等）以异步并行的方式运行，在读写Local Memory（如UB）时可能存在数据依赖关系。为确保数据一致性及计算正确性，需通过同步控制协调操作时序。
+
+    以MTE2从GM搬运数据至UB，进行Vector计算单元的Abs计算，再搬运回GM的流程为例，需满足以下同步条件：
+
+    1.  数据搬运与计算顺序
+        -   GM→UB搬运完成后再启动Vector单元的Abs计算（避免计算时未完成搬运导致的数据缺失）；
+        -   Vector计算完成后再执行UB→GM的数据搬运（确保结果数据已就绪）。
+
+    2.  循环搬运计算场景的同步规则
+        -   前序计算完成后再启动新搬运：上一次计算未完成时，不得触发新数据搬运（防止UB中旧数据被覆盖）；
+        -   前序数据搬出完成后再启动新计算：上一次数据未完全从UB搬出时，不得触发新计算任务（避免目标内存区域的覆盖冲突）。
+
+    同步控制流程如下图所示：
+
+    ![](../../../../figures/core_sync_final_18.png)
+
+    上图中，ID1、ID2、ID3、ID4、ID5、ID6表示事件ID（EventID），每个EventID对应一块存储数据的搬运状态，确保数据操作的正确性和一致性。
+
+    需要注意以下几点：
+
+    -   建议通过[AllocEventID](../../../../../api/SIMD-API/basic_api/resource_management/TPipe/AllocEventID.md)或者[FetchEventID](../../../../../api/SIMD-API/basic_api/resource_management/TPipe/FetchEventID.md)接口获取EventID，以确保其合法性和有效性。
+    -   EventID的数量有限，使用后应立即调用ReleaseEventID释放资源，避免EventID耗尽，影响系统正常运行。
+    -   SetFlag和WaitFlag必须成对使用，且SetFlag和WaitFlag的参数必须完全一致（包括模板参数和事件ID）。如果不匹配，可能导致当前核的计算异常，或影响下一个核的算子执行，引发timeout问题。
+
+        例如，`SetFlag<HardEvent::S_MTE3>(1)`和`SetFlag<HardEvent::MTE3_MTE1>(1)`设置的不是同一个EventID，因为其模板参数不同。只有当模板参数和事件ID完全一致时，才表示同一个EventID。
+
+    -   不允许连续设置同一个EventID，因为这可能导致事件状态混乱或未被正确处理。
+    -   不建议手动插入TEventID，不能手动插入6和7的TEventID，因为它们可能被系统预留或用于特殊用途。
+
+-   核间同步
+
+    该硬件架构不支持核间同步。

@@ -1,0 +1,75 @@
+# LocalMemAllocator构造函数<a name="ZH-CN_TOPIC_0000002337736701"></a>
+
+## 产品支持情况<a name="section73648168211"></a>
+
+<!-- npu="950" id1 -->
+- Ascend 950PR/Ascend 950DT：支持
+<!-- end id1 -->
+<!-- npu="A3" id2 -->
+- Atlas A3 训练系列产品/Atlas A3 推理系列产品：支持
+<!-- end id2 -->
+<!-- npu="910b" id3 -->
+- Atlas A2 训练系列产品/Atlas A2 推理系列产品：支持
+<!-- end id3 -->
+<!-- npu="310b" id4 -->
+- Atlas 200I/500 A2 推理产品：不支持
+<!-- end id4 -->
+<!-- npu="310p" id5 -->
+- Atlas 推理系列产品AI Core：支持
+<!-- end id5 -->
+<!-- npu="310p" id6 -->
+- Atlas 推理系列产品Vector Core：支持
+<!-- end id6 -->
+<!-- npu="910" id7 -->
+- Atlas 训练系列产品：不支持
+<!-- end id7 -->
+
+## 功能说明<a name="section618mcpsimp"></a>
+
+头文件路径为：`"basic_api/kernel_tensor.h"`。
+
+LocalMemAllocator构造函数。
+
+## 函数原型<a name="section620mcpsimp"></a>
+
+```cpp
+template <Hardware hard>
+__aicore__ inline LocalMemAllocator<hard>::LocalMemAllocator()
+```
+
+## 参数说明<a name="section622mcpsimp"></a>
+
+**表1**  模板参数说明
+
+<a name="table4835205712588"></a>
+<table><thead align="left"><tr id="row118356578583"><th class="cellrowborder" valign="top" width="27.839999999999996%" id="mcps1.2.3.1.1"><p id="p48354572582"><a name="p48354572582"></a><a name="p48354572582"></a>参数名</p>
+</th>
+<th class="cellrowborder" valign="top" width="72.16%" id="mcps1.2.3.1.2"><p id="p583535795817"><a name="p583535795817"></a><a name="p583535795817"></a>描述</p>
+</th>
+</tr>
+</thead>
+<tbody><tr id="row18835145716587"><td class="cellrowborder" valign="top" width="27.839999999999996%" headers="mcps1.2.3.1.1 "><p id="p1383515717581"><a name="p1383515717581"></a><a name="p1383515717581"></a>hard</p>
+</td>
+<td class="cellrowborder" valign="top" width="72.16%" headers="mcps1.2.3.1.2 "><p id="p823866165711"><a name="p823866165711"></a><a name="p823866165711"></a><span id="ph184621011705"><a name="ph184621011705"></a><a name="ph184621011705"></a><span id="ph969812395911"><a name="ph969812395911"></a><a name="ph969812395911"></a>用于表示数据的物理位置，Hardware枚举类型，定义如下，合法位置为：Unified Buffer（UB）、L1、L0A、L0B、L0C、BIAS、FIXBUF。</span></span></p>
+<a name="screen21992320439"></a><a name="screen21992320439"></a><pre class="screen" codetype="Cpp" id="screen21992320439">enum class Hardware : uint8_t { 
+GM,     // Global Memory
+UB,     // UB
+L1,     // L1 Buffer
+L0A,    // L0A Buffer
+L0B,    // L0B Buffer
+L0C,    // L0C Buffer
+BIAS,   // BiasTable Buffer
+FIXBUF, // Fixpipe Buffer
+MAX };</pre>
+</td>
+</tr>
+</tbody>
+</table>
+
+## 返回值说明<a name="section640mcpsimp"></a>
+
+无
+
+## 约束说明<a name="section633mcpsimp"></a>
+
+同一个物理位置的LocalMemAllocator对象，在算子生命周期内只能存在1个。

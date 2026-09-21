@@ -1,0 +1,38 @@
+.DS_Store
+**/.DS_Store
+
+# Local build and generated artifacts
+build/
+dist/
+CMakeFiles/
+CMakeCache.txt
+*.o
+*.so
+*.a
+*.run
+
+# Language and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Logs and runtime output
+log/
+logs/
+*.log
+
+# Test descriptors are versioned; local acceptance and experiment assets are not.
+/tests/st/cases/*
+!/tests/st/cases/coverage.json
+!/tests/st/cases/correctness.json
+!/tests/st/cases/mock.json
+/tests/st/scripts/audit_history.py
+/tests/st/scripts/official_mock.py
+/tests/st/scripts/replay_history.py
+/tests/st/scripts/source_preflight.py
+/tests/st/scripts/sweep_mock.py
+/tests/st/scripts/event_sweep.py
+/tests/ut/test_official_mock.py
+/docs/official_mock_workflow.md
+/docs/performance_plan.md
+/docs/experiments/

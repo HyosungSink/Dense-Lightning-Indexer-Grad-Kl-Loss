@@ -1,0 +1,71 @@
+# 2201到3510架构变更<a name="ZH-CN_TOPIC_0000002503428217"></a>
+
+[NPU架构版本3510](../../programming_guide/language_extension/simd_builtin_keywords.md#npu-arch)的架构图如[图1](#fig1097417534526)所示，总体来看，3510架构新增了以下特性：
+
+-   新增多条数据通路。
+-   AI Core核数增加。
+-   Unified Buffer（UB）容量提升。
+-   新增SSBuffer核内存储单元，支持AIC核和AIV核通过Scalar访问。
+-   SIMD编程基础上，支持SIMT编程、SIMD与SIMT混合编程。
+-   AIV核采用Regbase架构，与[NPU架构版本2201](../../programming_guide/language_extension/simd_builtin_keywords.md#npu-arch)的Membase架构相比，可以直接对芯片的Vector寄存器Register进行操作，实现更大的灵活性和更好的性能。
+
+**图1**  3510架构图<a name="fig1097417534526"></a>  
+![](../../figures/hw_arch.png "硬件架构")
+
+具体来说，3510架构的主要变更如下各表所示。除此之外，3510架构还扩展了支持的数据类型，具体可参考[数据类型介绍](../../../api/SIMD-API/basic_api/data_structures/builtin_data_types.md)。
+
+- 搬运单元<a name="section_2201_to_3510_data_move_unit_changes"></a>
+
+    **表1**  搬运单元变更
+    | 3510变更 | 产生的影响 | 影响的API接口 |
+    |----------|------------|---------------|
+    | 删除L1 Buffer到GM的数据通路。 | 现有接口不支持从L1 Buffer直接搬运数据到GM。开发者需要在L1 Buffer分配一块空间存放单位矩阵，利用MMAD矩阵乘法计算输出到L0C Buffer，从L0C Buffer通过[Fixpipe（L0C到GM数据搬运）](../../../api/SIMD-API/basic_api/cube_compute_ISASI/cube_compute_store/Fixpipe_L0CToGM.md)将数据搬运到GM。 | DataCopy/DumpTensor |
+    | 删除GM到L0A Buffer、L0B Buffer的数据通路。 | 原GM到L0A Buffer和L0B Buffer的数据搬运需要拆分为两步，即从GM到L1 Buffer的数据搬运和从L1 Buffer到L0A Buffer、L0B Buffer的数据搬运。 | LoadData |
+    | 新增UB到L1 Buffer的数据通路。 | 支持将数据直接从UB搬运到L1 Buffer，而无需先从UB搬运到GM，再从GM搬运到L1 Buffer，使用方式具体可参考[DataCopy（UBToL1连续数据搬运）](../../../api/SIMD-API/basic_api/cube_compute_ISASI/cube_compute_load/DataCopy_UBToL1_continuous.md)。 | DataCopy |
+    | 新增ND-DMA指令。 | 扩展DataCopy数据搬运接口的能力，相比基础数据搬运接口，可更加自由地配置搬入数据的维度信息及Stride，使用方式具体可参考[DataCopy（GMToUB多维数据搬运NDDMA）](../../../api/SIMD-API/basic_api/memory_vector_compute/data_move/DataCopy_GMToUB_NDDMA.md)。 | DataCopy |
+    | 新增L0C Buffer到UB的单向数据通路。 | 支持将数据直接从L0C Buffer搬运到UB，而无需先从L0C Buffer搬运到GM，再从GM搬运到UB，使用方式具体可参考[Fixpipe（L0C到GM数据搬运）](../../../api/SIMD-API/basic_api/cube_compute_ISASI/cube_compute_store/Fixpipe_L0CToGM.md)。 | Fixpipe |
+    | 扩展LoadData搬运指令。 | 新增支持MicroScaling（MX）场景的数据搬运，使用方式具体可参考[LoadData](../../../api/SIMD-API/basic_api/cube_compute_ISASI/cube_compute_load/LoadData_2D_MX.md)。 | LoadData |
+    | 新增DN分型、L1Buffer->L0A Buffer不再支持transpose。 | 使用新特性具体可参考[LoadDataWithTranspose](../../../api/SIMD-API/basic_api/cube_compute_ISASI/cube_compute_load/LoadDataWithTranspose.md)。 | LoadDataWithTranspose |
+    | Fixpipe新增NZ2DN随路转换（实现NZ到DN数据格式的随路变换）。 | 使用方式具体可参考[Fixpipe（L0C到GM数据搬运）](../../../api/SIMD-API/basic_api/cube_compute_ISASI/cube_compute_store/Fixpipe_L0CToGM.md)。 | Fixpipe |
+    | DataCopy搬运维度增强。 | DataCopy支持L1 Buffer与GM之间，GM与UB之间通路的loop模式搬运，使用方式具体可参考[SetLoopModePara](../../../api/SIMD-API/basic_api/memory_vector_compute/data_move_aux_config/SetLoopModePara.md)。 | DataCopy |
+    | 3510架构版本中删除了与L0A Buffer和L0B Buffer初始化相关的硬件指令。 | 使用基础API [Fill](../../../api/SIMD-API/basic_api/cube_compute_ISASI/cube_load_aux_config/Fill.md)将特定存储位置的LocalTensor初始化为某一具体数值，不支持直接初始化L0A Buffer、L0B Buffer上的LocalTensor。 | Fill |
+
+- 计算单元<a name="section_2201_to_3510_compute_unit_changes"></a>
+
+    **表2**  计算单元变更
+    | 3510变更 | 产生的影响 | 影响的API接口 |
+    |----------|------------|---------------|
+    | Cube计算单元不支持s4类型。 | 对于int4b_t数据类型的矩阵乘计算，开发者需要先将int4b_t的数据Cast转换为int8_t类型，再进行Cube计算。 | Mmad |
+    | Cube计算单元不支持L0A上ZZ到ZN的分形变化。 | L0A切分场景下，矩阵乘需要重新计算左矩阵的L0A地址。 | LoadData/LoadDataWithTranspose |
+    | Vector Core Membase架构切换到Regbase架构。 | 基础API部分场景性能降低。 | 基础API高维切分模式 |
+    | 硬件不支持Subnormal功能，当前使用软仿实现的Subnormal功能。 | 开发者需要通过设置config模板参数来配置Subnormal计算模式，具体请参考[矢量计算](./2201_to_3510_guide/basic_api_migration.md#section7364115741514)。 | Ln/Sqrt/Rsqrt/Div/Reciprocal/Exp |
+    | 不支持4:2稀疏矩阵的计算。 | 开发者需要利用Vector Core的能力，进行矩阵稠密转稀疏操作。 | LoadDataWithSparse/MmadWithSparse |
+
+- 存储单元<a name="section_2201_to_3510_storage_unit_changes"></a>
+
+    **表3**  存储单元变更
+
+    | 3510变更 | 产生的影响 | 影响的API接口 |
+    |----------|------------|---------------|
+    | 删除L1 Buffer空间的边界值设定。 | 3510架构硬件删除了L1 Buffer的边界值设定相关寄存器，不再支持SetLoadDataBoundary接口，具体请参考[基础API迁移指导](./2201_to_3510_guide/basic_api_migration.md)。 | SetLoadDataBoundary |
+    | UB结构变化。2201架构的UB结构和3510架构的UB结构对比请参考[bank结构对比](../../operator_practice/simd_operator_optimization/memory_access/avoid_ub_bank_conflict/overview.md)。 | 2201架构上UB分为16个bank group，每个bank group包含3个bank，每个bank大小为4KB。3510架构上UB分为8个bank group，每个bank group包含2个bank，每个bank大小为16KB。若发生UB冲突，开发者可参考[避免UB的bank冲突](../../operator_practice/simd_operator_optimization/memory_access/avoid_ub_bank_conflict/overview.md)解决UB冲突。 | / |
+
+
+- 同步
+
+    **表4**  同步变更
+
+    | 3510变更 | 产生的影响 | 影响的API接口 |
+    |----------|------------|---------------|
+    | 新增Mutex能力。 | Mutex用于核内异步流水指令之间的同步处理，其功能类似于传统CPU中的锁机制。通过锁定指定流水再释放流水来完成流水间的同步依赖，使用方式具体可参考[Mutex（ISASI）](../../../api/SIMD-API/basic_api/sync_control/intra_core_sync/Mutex_ISASI.md)。 | Mutex |
+    | 新增核间同步控制模式。 | 对于AI Core内部的同步控制，AIV0与AIV1可单独触发AIC等待，使用方式具体可参考[CrossCoreSetFlag(ISASI)](../../../api/SIMD-API/basic_api/sync_control/inter_core_sync/CrossCoreSetFlag_ISASI.md)。 | CrossCoreSetFlag/CrossCoreWaitFlag |
+
+- 其它
+
+    **表5**  其它变更
+
+    | 3510变更 | 产生的影响 | 影响的API接口 |
+    |----------|------------|---------------|
+    | 删除AIPP硬件级指令，采用软仿实现AIPP功能。 | AIPP接口性能可能有所下降。 | SetAippFunctions/LoadImageToLocal |
+    | 由于3510架构版本中相关寄存器的删除，UB异常调试接口也被移除。 | 调测接口对功能无影响。 | CheckLocalMemoryIA |
+    | 由于3510架构版本中相关寄存器的删除，获取ReduceRepeat所有repeat最值及索引的能力也被移除。|已开放RegBase基础能力，可通过[Reduce](../../../api/SIMD-API/basic_api/reg_vector_compute/reduction_compute/Reduce.md)进行手动实现。| GetReduceRepeatMaxMinSpr |

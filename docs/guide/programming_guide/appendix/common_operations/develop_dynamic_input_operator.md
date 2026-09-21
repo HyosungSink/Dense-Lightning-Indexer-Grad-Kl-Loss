@@ -1,0 +1,124 @@
+# 如何开发动态输入算子<a name="ZH-CN_TOPIC_0000002098772922"></a>
+
+动态输入算子是指算子的输入个数是动态的，例如AddN，将N个输入tensor累加到一起，输出一个tensor，输入tensor的个数是不固定的。动态输入算子的开发在构造和解析输入数据方面有差异：核函数（Kernel）的入参采用ListTensorDesc的结构存储输入数据信息，对应的，调用时需构造TensorList结构保存参数信息。下面基于kernel直调和工程化算子开发两种开发方式分别介绍具体开发流程。
+
+>[!NOTE]说明 
+>下文仅列出代码片段，完整样例请参考[动态输入算子样例](../../../../../../examples/01_simd_cpp_api/03_basic_api/04_memory_management/list_tensor_desc_input)。
+
+-   kernel直调
+    -   参考[ListTensorDesc](../../../../api/SIMD-API/basic_api/aux_data_structures/ListTensorDesc.md)数据结构自行定义ListTensorDesc和TensorDesc结构体，并将实际的输入数据保存至ListTensorDesc结构中。示例如下:
+
+        ptrOffset传入为ListTensorDesc首地址和数据指针首地址dataPtr之间的偏移量，tensorDesc中保存两个输入的tensor描述信息， dataPtr传入为保存输入数据的地址指针。
+
+        ```
+            constexpr uint32_t SHAPE_DIM = 2;
+            struct TensorDesc {
+                uint32_t dim{SHAPE_DIM};
+                uint32_t index;
+                uint64_t shape[SHAPE_DIM] = {8, 2048};
+            };
+        
+            TensorDesc xDesc;
+            xDesc.index = 0;
+            TensorDesc yDesc;
+            yDesc.index = 1;
+        
+            constexpr uint32_t TENSOR_DESC_NUM = 2;
+            struct ListTensorDesc {
+                uint64_t ptrOffset;
+                TensorDesc tensorDesc[TENSOR_DESC_NUM];
+                uintptr_t dataPtr[TENSOR_DESC_NUM];
+            } inputDesc;
+
+            inputDesc = {(1 + (1 + SHAPE_DIM) * TENSOR_DESC_NUM) * sizeof(uint64_t), {xDesc, yDesc}, {(uintptr_t)xDevice, (uintptr_t)yDevice}};
+        ```
+
+    -   kernel侧调用时，直接传入ListTensorDesc表达的输入信息。示例如下：
+
+        ```
+            // Allocate ListTensorDesc device memory
+            ret = aclrtMalloc((void **)&inputDescInDevice, sizeof(ListTensorDesc), ACL_MEM_MALLOC_HUGE_FIRST);
+            assert(ret == ACL_SUCCESS && "aclrtMalloc inputDescInDevice failed!");
+        
+            // Copy ListTensorDesc to device
+            ret = aclrtMemcpy(inputDescInDevice, sizeof(ListTensorDesc), &inputDesc, sizeof(ListTensorDesc),
+                                ACL_MEMCPY_HOST_TO_DEVICE);
+            assert(ret == ACL_SUCCESS && "aclrtMemcpy inputDesc to device failed!");
+        
+            list_tensor_desc_input_custom<<<numBlocks, 0, stream>>>(inputDescInDevice, zDevice, tiling);
+        ```
+    
+    -   kernel侧算子实现，入参需传入动态结构的数据（srcList），并使用AscendC::ListTensorDesc结构做解析。示例如下：
+
+        ```
+        __global__ __vector__ void list_tensor_desc_input_custom(GM_ADDR srcList, GM_ADDR z, AddCustomTilingData tiling)
+        {
+            AscendC::ListTensorDesc keyListTensorDescInit((__gm__ void*)srcList);
+            GM_ADDR x = (__gm__ uint8_t*)keyListTensorDescInit.GetDataPtr<__gm__ uint8_t>(0);
+            GM_ADDR y = (__gm__ uint8_t*)keyListTensorDescInit.GetDataPtr<__gm__ uint8_t>(1);
+        }
+        ```
+
+-   工程化算子开发
+    -   单算子调用时，构造List类型tensor并传入。
+
+        使用aclCreateTensor创建tensor后，需调用aclCreateTensorList，将创建好的tensor组成List形式，如下所示。
+
+        ```
+        inputTensorList = aclCreateTensorList(inputTensor_.data(), inputTensor_.size());
+        ```
+
+        获取算子使用的workspace空间大小接口的入参，也需使用aclTensorList结构参数，用来计算workspace的大小，调用示例如下。
+
+        ```
+        // 获取算子使用的workspace空间大小
+        aclnnStatus aclnnAddNCustomGetWorkspaceSize(const aclTensorList *srcList, const aclTensor *out, uint64_t *workspaceSize, aclOpExecutor **executor);
+        ```
+
+    -   算子原型定义中，输入数据的参数类型设置为动态，示例如下。
+
+        ```
+        this->Input("srcList")
+            .ParamType(DYNAMIC)
+            .DataType({ge::DT_FLOAT16})
+            .Format({ge::FORMAT_ND});
+        ```
+
+    -   host侧算子实现，获取动态输入信息的接口，需使用对应的动态接口。
+
+        例如，Tiling函数和InferShape函数中，GetDynamicInputShape接口用于获取动态输入的shape信息，InferDataType函数中，GetDynamicInputDataType接口用于获取动态输入的数据类型，示例如下。
+
+        ```
+        namespace ge {
+        static graphStatus InferShape(gert::InferShapeContext *context)
+        {
+            const gert::Shape *x1_shape = context->GetDynamicInputShape(0, 0);
+            gert::Shape *y_shape = context->GetOutputShape(0);
+            *y_shape = *x1_shape;
+            return GRAPH_SUCCESS;
+        }
+        
+        static graphStatus InferDataType(gert::InferDataTypeContext *context)
+        {
+            const auto inputDataType = context->GetDynamicInputDataType(0, 0);
+            context->SetOutputDataType(0, inputDataType);
+            return ge::GRAPH_SUCCESS;
+        }
+        } // namespace ge
+        ```
+
+    -   kernel侧算子实现，入参需传入动态结构的数据，并使用AscendC::ListTensorDesc结构做解析。
+
+        核函数（Kernel）入参需传入动态结构的数据，例如GM\_ADDR srcList，示例如下。
+
+        ```
+        extern "C" __global__ __aicore__ void addn_custom(GM_ADDR srcList, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling)
+        ```
+
+        对传入的参数srcList，需使用AscendC::ListTensorDesc结构做解析，得到每个tensor的具体信息，示例如下。
+
+        ```
+        AscendC::ListTensorDesc keyListTensorDescInit((__gm__ void*)srcList);
+        GM_ADDR x = (__gm__ uint8_t*)keyListTensorDescInit.GetDataPtr<__gm__ uint8_t>(0);
+        GM_ADDR y = (__gm__ uint8_t*)keyListTensorDescInit.GetDataPtr<__gm__ uint8_t>(1);
+        ```

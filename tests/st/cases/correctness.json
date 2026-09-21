@@ -1,0 +1,692 @@
+{
+  "schema_version": 1,
+  "category": "correctness",
+  "description": "Numerical invariants, gradients, masks, variable lengths and explicit compact-ABI regression cases.",
+  "reference_conventions": {
+    "layout": "BSND",
+    "sparse_mode": 3,
+    "relu_zero_gradient": 0,
+    "empty_causal_row": "inactive_zero_output",
+    "rope_score": "scale * (query @ key.T + queryRope @ keyRope.T)",
+    "intermediate_precision": "float32"
+  },
+  "cases": [
+    {
+      "id": "documented_example",
+      "kind": "numeric",
+      "seed": 2,
+      "shape": {
+        "B": 1,
+        "S1": 1,
+        "S2": 4,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "documented_example",
+      "rope": "zero",
+      "tags": [
+        "documented_example",
+        "s1_lt_s2",
+        "right_down_causal",
+        "scale_value",
+        "finite_kl",
+        "compact_schema_bridge"
+      ]
+    },
+    {
+      "id": "variable_lengths_and_padding_poison",
+      "kind": "numeric",
+      "seed": 301,
+      "shape": {
+        "B": 3,
+        "S1": 7,
+        "S2": 11,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "padding_poison",
+      "rope": "random",
+      "actual_seq_lengths_query": [
+        7,
+        5,
+        3
+      ],
+      "actual_seq_lengths_key": [
+        11,
+        8,
+        6
+      ],
+      "tags": [
+        "multi_batch",
+        "variable_lengths",
+        "padding_ignored",
+        "actual_lengths_explicit",
+        "output_init",
+        "rope_nonzero"
+      ]
+    },
+    {
+      "id": "right_down_mask_boundary",
+      "kind": "numeric",
+      "seed": 303,
+      "shape": {
+        "B": 1,
+        "S1": 4,
+        "S2": 7,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "right_down_causal",
+        "mask_boundary",
+        "masked_positions_ignored"
+      ]
+    },
+    {
+      "id": "query_longer_than_key",
+      "kind": "numeric",
+      "seed": 304,
+      "shape": {
+        "B": 1,
+        "S1": 6,
+        "S2": 3,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "s1_gt_s2",
+        "empty_causal_row",
+        "finite_kl",
+        "output_init"
+      ]
+    },
+    {
+      "id": "probability_tail_stability",
+      "kind": "numeric",
+      "seed": 305,
+      "shape": {
+        "B": 1,
+        "S1": 3,
+        "S2": 9,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float32",
+      "pattern": "extreme_logits",
+      "rope": "zero",
+      "tags": [
+        "probability_tail",
+        "stable_softmax",
+        "finite_kl",
+        "zero_probability_boundary"
+      ]
+    },
+    {
+      "id": "relu_zero_and_signs",
+      "kind": "numeric",
+      "seed": 306,
+      "shape": {
+        "B": 1,
+        "S1": 4,
+        "S2": 8,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float32",
+      "pattern": "relu_boundary",
+      "rope": "zero",
+      "tags": [
+        "relu_negative",
+        "relu_zero",
+        "relu_positive",
+        "relu_zero_gradient"
+      ]
+    },
+    {
+      "id": "zero_weights_chain_rule",
+      "kind": "numeric",
+      "seed": 3061,
+      "shape": {
+        "B": 1,
+        "S1": 4,
+        "S2": 8,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float32",
+      "pattern": "zero_weights",
+      "rope": "random",
+      "tags": [
+        "weights_zero",
+        "chain_rule",
+        "finite_kl",
+        "rope_nonzero"
+      ]
+    },
+    {
+      "id": "dkey_cross_query_accumulation",
+      "kind": "numeric",
+      "seed": 307,
+      "shape": {
+        "B": 2,
+        "S1": 5,
+        "S2": 8,
+        "N1": 32,
+        "Nidx1": 16
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float32",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "dkey_accumulation",
+        "multi_query",
+        "multi_batch"
+      ]
+    },
+    {
+      "id": "rope_dominates_main_score",
+      "kind": "numeric",
+      "seed": 308,
+      "shape": {
+        "B": 1,
+        "S1": 3,
+        "S2": 6,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "dominant",
+      "tags": [
+        "rope_nonzero",
+        "rope_affects_target",
+        "full_abi_only"
+      ]
+    },
+    {
+      "id": "custom_scale_value",
+      "kind": "numeric",
+      "seed": 309,
+      "shape": {
+        "B": 1,
+        "S1": 3,
+        "S2": 6,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "random",
+      "scale_value": 0.125,
+      "tags": [
+        "scale_value",
+        "rope_nonzero",
+        "full_abi_only"
+      ]
+    },
+    {
+      "id": "finite_difference_probe",
+      "kind": "numeric",
+      "seed": 310,
+      "shape": {
+        "B": 1,
+        "S1": 2,
+        "S2": 4,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float32",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "finite_difference",
+        "gradient_query_index",
+        "gradient_key_index",
+        "gradient_weights"
+      ]
+    },
+    {
+      "id": "runtime_default_nondeterministic",
+      "kind": "runtime_only",
+      "deterministic": false,
+      "expected": "within_tolerance",
+      "tags": [
+        "nondeterministic",
+        "runtime_only"
+      ]
+    },
+    {
+      "id": "runtime_deterministic_context",
+      "kind": "runtime_only",
+      "deterministic": true,
+      "expected": "bitwise_repeatable",
+      "tags": [
+        "deterministic",
+        "runtime_only"
+      ]
+    },
+    {
+      "id": "odd_dims_bsnd",
+      "kind": "compact",
+      "shape": [
+        2,
+        3,
+        5,
+        3,
+        5,
+        7
+      ],
+      "dtype": "float32",
+      "deviations": [
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5
+      ],
+      "causal": false,
+      "loss_epsilon": 1e-12
+    },
+    {
+      "id": "odd_dims_bnsd",
+      "kind": "compact",
+      "shape": [
+        2,
+        3,
+        5,
+        3,
+        5,
+        7
+      ],
+      "layout": "BNSD",
+      "weight_layout": "BNS",
+      "deviations": [
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5
+      ],
+      "causal": false,
+      "loss_epsilon": 1e-12
+    },
+    {
+      "id": "odd_dims_bnsd_bsn",
+      "kind": "compact",
+      "shape": [
+        2,
+        3,
+        5,
+        3,
+        5,
+        7
+      ],
+      "layout": "BNSD",
+      "deviations": [
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5
+      ],
+      "causal": false,
+      "loss_epsilon": 1e-12
+    },
+    {
+      "id": "odd_dims_snd",
+      "kind": "compact",
+      "shape": [
+        1,
+        5,
+        3,
+        3,
+        5,
+        7
+      ],
+      "layout": "SND",
+      "dtype": "float32",
+      "causal": false,
+      "loss_epsilon": 1e-12
+    },
+    {
+      "id": "bf16_mixed_tail",
+      "kind": "compact",
+      "shape": [
+        2,
+        3,
+        5,
+        3,
+        5,
+        17
+      ],
+      "dtype": "bfloat16",
+      "weights_dtype": "float32",
+      "deviations": [
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5
+      ],
+      "causal": false,
+      "loss_epsilon": 1e-12
+    },
+    {
+      "id": "larger_dim_tail",
+      "kind": "compact",
+      "shape": [
+        1,
+        3,
+        5,
+        3,
+        5,
+        257
+      ],
+      "dtype": "float32",
+      "deviations": [
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5
+      ],
+      "causal": false,
+      "loss_epsilon": 1e-12
+    },
+    {
+      "id": "single_key_f16",
+      "kind": "compact",
+      "shape": [
+        1,
+        1,
+        1,
+        128,
+        16,
+        64
+      ],
+      "causal": false,
+      "loss_epsilon": 1e-12,
+      "deviations": [
+        2,
+        2,
+        2,
+        2,
+        2
+      ]
+    },
+    {
+      "id": "single_key_f32",
+      "kind": "compact",
+      "shape": [
+        1,
+        1,
+        1,
+        128,
+        16,
+        128
+      ],
+      "dtype": "float32",
+      "causal": false,
+      "loss_epsilon": 1e-12,
+      "deviations": [
+        2,
+        2,
+        2,
+        2,
+        2
+      ]
+    },
+    {
+      "id": "single_key_bsnd_tail",
+      "kind": "compact",
+      "shape": [
+        3,
+        7,
+        1,
+        5,
+        9,
+        17
+      ],
+      "causal": false,
+      "loss_epsilon": 1e-12,
+      "deviations": [
+        2,
+        2,
+        2,
+        2,
+        2
+      ]
+    },
+    {
+      "id": "single_key_bnsd_tail",
+      "kind": "compact",
+      "shape": [
+        3,
+        7,
+        1,
+        5,
+        9,
+        17
+      ],
+      "layout": "BNSD",
+      "weight_layout": "BNS",
+      "dtype": "bfloat16",
+      "weights_dtype": "float32",
+      "causal": false,
+      "loss_epsilon": 1e-12,
+      "deviations": [
+        2,
+        2,
+        2,
+        2,
+        2
+      ]
+    },
+    {
+      "id": "single_key_snd_tail",
+      "kind": "compact",
+      "shape": [
+        1,
+        13,
+        1,
+        7,
+        3,
+        257
+      ],
+      "layout": "SND",
+      "dtype": "float32",
+      "causal": false,
+      "loss_epsilon": 1e-12,
+      "deviations": [
+        2,
+        2,
+        2,
+        2,
+        2
+      ]
+    },
+    {
+      "id": "vector_heads_128_64",
+      "kind": "compact",
+      "shape": [
+        2,
+        3,
+        7,
+        128,
+        64,
+        128
+      ],
+      "causal": false,
+      "loss_epsilon": 1e-12
+    },
+    {
+      "id": "vector_heads_f32",
+      "kind": "compact",
+      "shape": [
+        1,
+        1,
+        4,
+        128,
+        64,
+        128
+      ],
+      "dtype": "float32",
+      "causal": false,
+      "loss_epsilon": 1e-12
+    },
+    {
+      "id": "vector_key_tail_95",
+      "kind": "compact",
+      "shape": [
+        1,
+        1,
+        95,
+        32,
+        8,
+        128
+      ],
+      "causal": false,
+      "loss_epsilon": 1e-12
+    },
+    {
+      "id": "vector_dim_65_heads_17",
+      "kind": "compact",
+      "shape": [
+        2,
+        3,
+        19,
+        17,
+        17,
+        65
+      ],
+      "weights_dtype": "float32",
+      "causal": false,
+      "loss_epsilon": 1e-12
+    },
+    {
+      "id": "vector_dense_probability_tail",
+      "kind": "compact",
+      "shape": [
+        1,
+        4,
+        17,
+        32,
+        8,
+        128
+      ],
+      "pattern": "separated_extremes",
+      "causal": false,
+      "loss_epsilon": 1e-12
+    },
+    {
+      "id": "vector_zero_relu",
+      "kind": "compact",
+      "shape": [
+        2,
+        3,
+        5,
+        64,
+        16,
+        64
+      ],
+      "pattern": "zeros",
+      "causal": false,
+      "loss_epsilon": 1e-12
+    },
+    {
+      "id": "vector_bnsd_heads",
+      "kind": "compact",
+      "shape": [
+        2,
+        3,
+        7,
+        64,
+        32,
+        128
+      ],
+      "layout": "BNSD",
+      "weight_layout": "BNS",
+      "dtype": "bfloat16",
+      "weights_dtype": "float32",
+      "causal": false,
+      "loss_epsilon": 1e-12
+    },
+    {
+      "id": "fallback_main_heads",
+      "kind": "compact",
+      "shape": [
+        1,
+        1,
+        3,
+        129,
+        8,
+        64
+      ],
+      "dtype": "float32",
+      "causal": false,
+      "loss_epsilon": 1e-12
+    },
+    {
+      "id": "fallback_index_heads",
+      "kind": "compact",
+      "shape": [
+        1,
+        2,
+        3,
+        8,
+        129,
+        64
+      ],
+      "causal": false,
+      "loss_epsilon": 1e-12
+    },
+    {
+      "id": "fallback_key_length",
+      "kind": "compact",
+      "shape": [
+        1,
+        2,
+        129,
+        8,
+        8,
+        64
+      ],
+      "causal": false,
+      "loss_epsilon": 1e-12
+    },
+    {
+      "id": "fallback_dimension",
+      "kind": "compact",
+      "shape": [
+        1,
+        2,
+        3,
+        8,
+        8,
+        129
+      ],
+      "dtype": "float32",
+      "causal": false,
+      "loss_epsilon": 1e-12
+    }
+  ]
+}

@@ -1,0 +1,711 @@
+{
+  "schema_version": 1,
+  "category": "coverage",
+  "description": "Documented input ranges, dtype/head combinations, rejection cases and deferred ABI/platform checks.",
+  "cases": [
+    {
+      "id": "smoke_uniform_minimum",
+      "kind": "numeric",
+      "seed": 1,
+      "shape": {
+        "B": 1,
+        "S1": 1,
+        "S2": 1,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "zeros",
+      "rope": "zero",
+      "tags": [
+        "smoke",
+        "batch_min",
+        "s1_min",
+        "s2_min",
+        "equal_lengths",
+        "uniform_distribution",
+        "zero_loss",
+        "output_shapes",
+        "output_init",
+        "compact_schema_bridge"
+      ]
+    },
+    {
+      "id": "head_grid_n32_i8",
+      "kind": "numeric",
+      "seed": 100,
+      "shape": {
+        "B": 1,
+        "S1": 3,
+        "S2": 5,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "head_cross_product",
+        "n1_32",
+        "nidx1_8"
+      ]
+    },
+    {
+      "id": "head_grid_n32_i16",
+      "kind": "numeric",
+      "seed": 101,
+      "shape": {
+        "B": 1,
+        "S1": 3,
+        "S2": 5,
+        "N1": 32,
+        "Nidx1": 16
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "head_cross_product",
+        "n1_32",
+        "nidx1_16"
+      ]
+    },
+    {
+      "id": "head_grid_n32_i32",
+      "kind": "numeric",
+      "seed": 102,
+      "shape": {
+        "B": 1,
+        "S1": 3,
+        "S2": 5,
+        "N1": 32,
+        "Nidx1": 32
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "head_cross_product",
+        "n1_32",
+        "nidx1_32"
+      ]
+    },
+    {
+      "id": "head_grid_n32_i64",
+      "kind": "numeric",
+      "seed": 103,
+      "shape": {
+        "B": 1,
+        "S1": 3,
+        "S2": 5,
+        "N1": 32,
+        "Nidx1": 64
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "head_cross_product",
+        "n1_32",
+        "nidx1_64"
+      ]
+    },
+    {
+      "id": "head_grid_n64_i8",
+      "kind": "numeric",
+      "seed": 104,
+      "shape": {
+        "B": 1,
+        "S1": 3,
+        "S2": 5,
+        "N1": 64,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "head_cross_product",
+        "n1_64",
+        "nidx1_8"
+      ]
+    },
+    {
+      "id": "head_grid_n64_i16",
+      "kind": "numeric",
+      "seed": 105,
+      "shape": {
+        "B": 1,
+        "S1": 3,
+        "S2": 5,
+        "N1": 64,
+        "Nidx1": 16
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "head_cross_product",
+        "n1_64",
+        "nidx1_16"
+      ]
+    },
+    {
+      "id": "head_grid_n64_i32",
+      "kind": "numeric",
+      "seed": 106,
+      "shape": {
+        "B": 1,
+        "S1": 3,
+        "S2": 5,
+        "N1": 64,
+        "Nidx1": 32
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "head_cross_product",
+        "n1_64",
+        "nidx1_32"
+      ]
+    },
+    {
+      "id": "head_grid_n64_i64",
+      "kind": "numeric",
+      "seed": 107,
+      "shape": {
+        "B": 1,
+        "S1": 3,
+        "S2": 5,
+        "N1": 64,
+        "Nidx1": 64
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "head_cross_product",
+        "n1_64",
+        "nidx1_64"
+      ]
+    },
+    {
+      "id": "head_grid_n128_i8",
+      "kind": "numeric",
+      "seed": 108,
+      "shape": {
+        "B": 1,
+        "S1": 3,
+        "S2": 5,
+        "N1": 128,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "head_cross_product",
+        "n1_128",
+        "nidx1_8"
+      ]
+    },
+    {
+      "id": "head_grid_n128_i16",
+      "kind": "numeric",
+      "seed": 109,
+      "shape": {
+        "B": 1,
+        "S1": 3,
+        "S2": 5,
+        "N1": 128,
+        "Nidx1": 16
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "head_cross_product",
+        "n1_128",
+        "nidx1_16"
+      ]
+    },
+    {
+      "id": "head_grid_n128_i32",
+      "kind": "numeric",
+      "seed": 110,
+      "shape": {
+        "B": 1,
+        "S1": 3,
+        "S2": 5,
+        "N1": 128,
+        "Nidx1": 32
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "head_cross_product",
+        "n1_128",
+        "nidx1_32"
+      ]
+    },
+    {
+      "id": "head_grid_n128_i64",
+      "kind": "numeric",
+      "seed": 111,
+      "shape": {
+        "B": 1,
+        "S1": 3,
+        "S2": 5,
+        "N1": 128,
+        "Nidx1": 64
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "head_cross_product",
+        "n1_128",
+        "nidx1_64",
+        "max_heads"
+      ]
+    },
+    {
+      "id": "dtype_bfloat16_weights_bfloat16",
+      "kind": "numeric",
+      "seed": 200,
+      "shape": {
+        "B": 2,
+        "S1": 4,
+        "S2": 7,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "bfloat16",
+      "weights_dtype": "bfloat16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "dtype_bfloat16",
+        "weights_bfloat16",
+        "output_dtypes"
+      ]
+    },
+    {
+      "id": "dtype_bfloat16_weights_float32",
+      "kind": "numeric",
+      "seed": 201,
+      "shape": {
+        "B": 2,
+        "S1": 4,
+        "S2": 7,
+        "N1": 32,
+        "Nidx1": 16
+      },
+      "input_dtype": "bfloat16",
+      "weights_dtype": "float32",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "dtype_bfloat16",
+        "weights_float32",
+        "output_dtypes"
+      ]
+    },
+    {
+      "id": "dtype_float16_weights_float32",
+      "kind": "numeric",
+      "seed": 202,
+      "shape": {
+        "B": 2,
+        "S1": 4,
+        "S2": 7,
+        "N1": 64,
+        "Nidx1": 16
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float32",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "dtype_float16",
+        "weights_float32",
+        "output_dtypes"
+      ]
+    },
+    {
+      "id": "batch_maximum_numeric",
+      "kind": "numeric",
+      "seed": 300,
+      "shape": {
+        "B": 256,
+        "S1": 1,
+        "S2": 2,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "batch_max",
+        "multi_batch",
+        "loss_sum"
+      ]
+    },
+    {
+      "id": "non_aligned_tail_tiles",
+      "kind": "numeric",
+      "seed": 302,
+      "shape": {
+        "B": 1,
+        "S1": 17,
+        "S2": 33,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "pattern": "random",
+      "rope": "zero",
+      "tags": [
+        "non_aligned_tail",
+        "s1_lt_s2",
+        "right_down_causal"
+      ]
+    },
+    {
+      "id": "max_s1_shape_only",
+      "kind": "shape_only",
+      "shape": {
+        "B": 8,
+        "S1": 131072,
+        "S2": 1,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float16",
+      "tags": [
+        "s1_max",
+        "shape_only",
+        "tiling_64bit",
+        "large_sequence"
+      ]
+    },
+    {
+      "id": "max_s2_shape_only",
+      "kind": "shape_only",
+      "shape": {
+        "B": 8,
+        "S1": 1,
+        "S2": 131072,
+        "N1": 32,
+        "Nidx1": 8
+      },
+      "input_dtype": "bfloat16",
+      "weights_dtype": "float32",
+      "tags": [
+        "s2_max",
+        "shape_only",
+        "large_sequence",
+        "online_softmax"
+      ]
+    },
+    {
+      "id": "large_mixed_shape_only",
+      "kind": "shape_only",
+      "shape": {
+        "B": 4,
+        "S1": 4097,
+        "S2": 8193,
+        "N1": 128,
+        "Nidx1": 64
+      },
+      "input_dtype": "float16",
+      "weights_dtype": "float32",
+      "actual_seq_lengths_query": [
+        4097,
+        4001,
+        2049,
+        1
+      ],
+      "actual_seq_lengths_key": [
+        8193,
+        8003,
+        4099,
+        17
+      ],
+      "tags": [
+        "large_sequence",
+        "non_aligned_tail",
+        "variable_lengths",
+        "max_heads",
+        "performance_shape"
+      ]
+    },
+    {
+      "id": "invalid_batch_zero",
+      "kind": "invalid",
+      "shape": {
+        "B": 0
+      },
+      "expected_error": "B must be"
+    },
+    {
+      "id": "invalid_batch_257",
+      "kind": "invalid",
+      "shape": {
+        "B": 257
+      },
+      "expected_error": "B must be"
+    },
+    {
+      "id": "invalid_s1_empty",
+      "kind": "invalid",
+      "shape": {
+        "S1": 0
+      },
+      "expected_error": "S1 must be"
+    },
+    {
+      "id": "invalid_s2_empty",
+      "kind": "invalid",
+      "shape": {
+        "S2": 0
+      },
+      "expected_error": "S2 must be"
+    },
+    {
+      "id": "invalid_s1_too_large",
+      "kind": "invalid",
+      "shape": {
+        "S1": 131073
+      },
+      "expected_error": "S1 must be"
+    },
+    {
+      "id": "invalid_s2_too_large",
+      "kind": "invalid",
+      "shape": {
+        "S2": 131073
+      },
+      "expected_error": "S2 must be"
+    },
+    {
+      "id": "invalid_d",
+      "kind": "invalid",
+      "shape": {
+        "D": 64
+      },
+      "expected_error": "D must equal"
+    },
+    {
+      "id": "invalid_dr",
+      "kind": "invalid",
+      "shape": {
+        "Dr": 32
+      },
+      "expected_error": "Dr must equal"
+    },
+    {
+      "id": "invalid_n1",
+      "kind": "invalid",
+      "shape": {
+        "N1": 16,
+        "N2": 16
+      },
+      "expected_error": "N1 must be"
+    },
+    {
+      "id": "invalid_n2_mismatch",
+      "kind": "invalid",
+      "shape": {
+        "N1": 32,
+        "N2": 8
+      },
+      "expected_error": "N2 must equal"
+    },
+    {
+      "id": "invalid_nidx1",
+      "kind": "invalid",
+      "shape": {
+        "Nidx1": 4
+      },
+      "expected_error": "Nidx1 must be"
+    },
+    {
+      "id": "invalid_nidx2",
+      "kind": "invalid",
+      "shape": {
+        "Nidx2": 2
+      },
+      "expected_error": "Nidx2 must equal"
+    },
+    {
+      "id": "invalid_input_float32",
+      "kind": "invalid",
+      "input_dtype": "float32",
+      "expected_error": "must be float16 or bfloat16"
+    },
+    {
+      "id": "invalid_tensor_dtype_mismatch",
+      "kind": "invalid",
+      "tensor_dtypes": {
+        "query": "float16",
+        "key": "bfloat16",
+        "query_index": "float16",
+        "key_index": "float16"
+      },
+      "expected_error": "dtypes must match"
+    },
+    {
+      "id": "invalid_weights_dtype",
+      "kind": "invalid",
+      "weights_dtype": "float64",
+      "expected_error": "weights dtype must"
+    },
+    {
+      "id": "invalid_non_float32_weights_mismatch",
+      "kind": "invalid",
+      "input_dtype": "float16",
+      "weights_dtype": "bfloat16",
+      "expected_error": "must match"
+    },
+    {
+      "id": "invalid_layout",
+      "kind": "invalid",
+      "layout": "BNSD",
+      "expected_error": "layout must be BSND"
+    },
+    {
+      "id": "invalid_sparse_mode",
+      "kind": "invalid",
+      "sparse_mode": 0,
+      "expected_error": "sparseMode must equal 3"
+    },
+    {
+      "id": "invalid_pre_tokens",
+      "kind": "invalid",
+      "pre_tokens": 1024,
+      "expected_error": "pre_tokens"
+    },
+    {
+      "id": "invalid_next_tokens",
+      "kind": "invalid",
+      "next_tokens": 1024,
+      "expected_error": "next_tokens"
+    },
+    {
+      "id": "invalid_actual_query_count",
+      "kind": "invalid",
+      "shape": {
+        "B": 2,
+        "S1": 4
+      },
+      "actual_seq_lengths_query": [
+        4
+      ],
+      "expected_error": "must contain B entries"
+    },
+    {
+      "id": "invalid_actual_key_too_large",
+      "kind": "invalid",
+      "shape": {
+        "B": 1,
+        "S2": 4
+      },
+      "actual_seq_lengths_key": [
+        5
+      ],
+      "expected_error": "values must be"
+    },
+    {
+      "id": "runtime_atlas_a2_fp16",
+      "kind": "runtime_only",
+      "platform": "Atlas A2",
+      "expected": "supported",
+      "tags": [
+        "atlas_a2",
+        "runtime_only"
+      ]
+    },
+    {
+      "id": "runtime_atlas_a3_bfloat16",
+      "kind": "runtime_only",
+      "platform": "Atlas A3",
+      "expected": "supported",
+      "tags": [
+        "atlas_a3",
+        "runtime_only"
+      ]
+    },
+    {
+      "id": "runtime_950pr_rejected",
+      "kind": "runtime_only",
+      "platform": "Ascend 950PR",
+      "expected": "unsupported",
+      "tags": [
+        "ascend_950_unsupported",
+        "runtime_only"
+      ]
+    },
+    {
+      "id": "runtime_950dt_rejected",
+      "kind": "runtime_only",
+      "platform": "Ascend 950DT",
+      "expected": "unsupported",
+      "tags": [
+        "ascend_950_unsupported",
+        "runtime_only"
+      ]
+    },
+    {
+      "id": "pending_compact_schema_float32_inputs",
+      "kind": "abi_pending",
+      "schema": "current_host_five_inputs",
+      "input_dtype": "float32",
+      "expected": "run only if evaluator confirms compact schema dtypes",
+      "tags": [
+        "abi_pending",
+        "compact_float32_pending"
+      ]
+    },
+    {
+      "id": "pending_current_schema_fp16_loss",
+      "kind": "abi_pending",
+      "schema": "current_host_five_inputs",
+      "loss_dtype": "float16",
+      "expected": "reject or remove if formal float32 loss is authoritative",
+      "tags": [
+        "abi_pending",
+        "compact_fp16_loss_pending"
+      ]
+    },
+    {
+      "id": "pending_full_schema_statistics_rope_lengths",
+      "kind": "abi_pending",
+      "schema": "formal_full_abi",
+      "expected": "run after evaluator exposes the documented inputs",
+      "tags": [
+        "abi_pending",
+        "full_abi_pending"
+      ]
+    }
+  ]
+}

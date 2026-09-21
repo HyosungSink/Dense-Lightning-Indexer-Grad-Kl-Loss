@@ -1,0 +1,141 @@
+# 分离模式<a name="ZH-CN_TOPIC_0000002532228173"></a>
+
+>[!NOTE]说明 
+>本节内容为针对分离模式，使用基础API进行矩阵乘法的编程指导。
+
+针对[分离模式](../../../programming_guide/advanced_programming/hardware_implementation/basic_architecture.md#section1574769433)，由于硬件架构差异，在使用基础API进行矩阵乘法算子的实现上存在差异：
+- 分离模式中，Cube计算单元与Vector计算单元分离部署，每个核有自己的Scalar单元，能独立加载自己的代码段。在核函数（Kernel）编写时，可通过函数类型限定符\_\_cube\_\_标识该核函数（Kernel）在设备端aicore上的Cube计算单元执行。
+- 分离模式中支持Fixpipe硬件加速，支持从L0C Buffer直接搬出数据到L1 Buffer/Global Memory/Unified Buffer（UB）的同时，完成量化、反量化、数据排布格式转换等功能。
+
+遵循算子分析、核函数（Kernel）定义、算子类实现的开发流程，下面以Matmul算子为例，给出分离模式下Matmul算子的代码框架。
+
+## 算子分析<a name="zh-cn_topic_0000002135641293_section11569817102912"></a>
+
+Matmul算子完成形状为\[m, k\]的矩阵a和形状为\[k, n\]的矩阵b的矩阵乘，得到形状为\[m, n\]的矩阵c。为了方便这里取m=k=n=32。Matmul算子的输入输出、计算逻辑以及需要调用的Ascend C接口如下表所示。
+
+**表1** Ascend C Matmul算子设计规格
+
+| 项目 | 内容 |
+|------|------|
+| 算子类型（OpType） | Matmul |
+| 算子输入a | shape：(m, k) = (32, 32)；data type：half；format：[ND](../../../technical_appendix/concepts_and_terms/neural_networks_and_operators/data_layout.md) |
+| 算子输入b | shape：(k, n) = (32, 32)；data type：half；format：[ND](../../../technical_appendix/concepts_and_terms/neural_networks_and_operators/data_layout.md) |
+| 算子输出c | shape：(m, n) = (32, 32)；data type：half；format：[ND](../../../technical_appendix/concepts_and_terms/neural_networks_and_operators/data_layout.md) |
+| 核函数（Kernel）名称 | matmul_custom |
+| 使用的主要接口 | [DataCopy（GMToL1随路转换-ND2NZ搬运）](../../../../api/SIMD-API/basic_api/cube_compute_ISASI/cube_compute_load/DataCopy_GMToL1_ND2NZ.md)：Global Memory到L1 Buffer数据搬运 + ND转NZ格式转换接口<br>[LoadData（2D矩阵搬运）](../../../../api/SIMD-API/basic_api/cube_compute_ISASI/cube_compute_load/LoadData_2D.md)：L1 Buffer到L0 Buffer数据搬运 + NZ转ZZ/ZN格式转换接口<br>[Mmad](../../../../api/SIMD-API/basic_api/cube_compute_ISASI/mmad_compute/Mmad.md)：矩阵乘计算接口<br>[Fixpipe（L0C到GM数据搬运）](../../../../api/SIMD-API/basic_api/cube_compute_ISASI/cube_compute_store/Fixpipe_L0CToGM.md)：L0C Buffer到Global Memory数据搬出 + NZ转ND格式转换 + 精度转换接口 |
+
+## 核函数（Kernel）定义<a name="zh-cn_topic_0000002135641293_section434251315304"></a>
+
+根据[核函数（Kernel）](../../../programming_guide/programming_model/ai_core_simd_programming/kernel_function.md)中介绍的规则进行核函数（Kernel）的定义。核函数（Kernel）名为matmul\_custom，有3个参数a，b，c，其中a，b都为输入内存，c为输出内存。使用函数类型限定符\_\_global\_\_来标识它是一个核函数（Kernel），可以被<<<\>\>\>调用；使用函数类型限定符\_\_cube\_\_来标识该核函数（Kernel）在设备端aicore上的Cube核执行。
+
+核函数（Kernel）中，算子类的Init函数，完成内存初始化相关工作，Process函数完成算子实现的核心逻辑。核函数（Kernel）在开始时调用`AscendC::InitSocState()`初始化硬件状态，结束时调用`AscendC::PipeBarrier<PIPE_ALL>()`等待所有指令完成。
+
+```cpp
+template <uint32_t M, uint32_t K, uint32_t N>
+__global__ __cube__ void mmad_custom(__gm__ uint8* a, __gm__ uint8* b, __gm__ uint8* c)
+{
+    AscendC::InitSocState();
+    KernelMatmul<M, K, N> op;
+    op.Init(a, b, c);
+    op.Process();
+    AscendC::PipeBarrier<PIPE_ALL>();
+}
+```
+
+> [!NOTE]说明
+> 核函数（Kernel）使用模板参数传入矩阵的维度信息，这样可以在编译期确定循环次数，有利于编译器优化。其中M/K/N为总矩阵维度。
+
+## 算子类实现<a name="zh-cn_topic_0000002135641293_section1882915463510"></a>
+
+在分离模式中，一个Matmul矩阵乘算子的实现分为以下四步流水。
+
+1.  CopyIn任务（Globale Memory --> L1 Buffer）  
+    使用[DataCopy（GMToL1随路转换-ND2NZ搬运）](../../../../api/SIMD-API/basic_api/cube_compute_ISASI/cube_compute_load/DataCopy_GMToL1_ND2NZ.md)接口将Global Memory 中的数据搬运到L1 Buffer，将ND格式转换为NZ格式。
+
+2.  Split任务（L1 Buffer--> L0 Buffer）    
+    使用[LoadData（2D矩阵搬运）](../../../../api/SIMD-API/basic_api/cube_compute_ISASI/cube_compute_load/LoadData_2D.md)接口将数据从L1 Buffer中搬运到L0A Buffer/L0B Buffer，同时完成NZ到ZZ/ZN的格式转换。
+
+3.  Compute任务（矩阵乘计算）    
+    使用[Mmad](../../../../api/SIMD-API/basic_api/cube_compute_ISASI/mmad_compute/Mmad.md)接口在完成矩阵乘计算，结果存放在L0C Buffer。
+
+4.  CopyOut任务（L0C Buffer--> Globale Memory）    
+    使用[Fixpipe（L0C到GM数据搬运）](../../../../api/SIMD-API/basic_api/cube_compute_ISASI/cube_compute_store/Fixpipe_L0CToGM.md)接口将结果从L0C Buffer直接搬运到Global Memory，同时利用Fixpipe的随路格式转换功能将NZ格式转回ND格式。
+
+一个典型的Matmul算子类的代码框架如下所示。
+
+```cpp
+template <uint32_t M, uint32_t K, uint32_t N>
+class KernelMatmul {
+public:
+    __aicore__ inline KernelMatmul() {}
+    __aicore__ inline void Init(__gm__ uint8_t* a, __gm__ uint8_t* b, __gm__ uint8_t* c)
+    {
+        aGM.SetGlobalBuffer((__gm__ half*)a);
+        bGM.SetGlobalBuffer((__gm__ half*)b);
+        cGM.SetGlobalBuffer((__gm__ half*)c);
+    }
+
+    __aicore__ inline void Process()
+    {
+        AscendC::LocalTensor<half> a1Local(AscendC::TPosition::A1, a1Addr, M * K);
+        AscendC::LocalTensor<half> a2Local(AscendC::TPosition::A2, a2Addr, M * K);
+        AscendC::LocalTensor<half> b1Local(AscendC::TPosition::B1, b1Addr, K * N);
+        AscendC::LocalTensor<half> b2Local(AscendC::TPosition::B2, b2Addr, K * N);
+        AscendC::LocalTensor<float> cLocal(AscendC::TPosition::CO1, cAddr, M * N);
+
+        CopyInA(a1Local);
+        CopyInB(b1Local);
+
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        DataLoadA(a1Local, a2Local);
+        DataLoadB(b1Local, b2Local);
+
+        AscendC::PipeBarrier<PIPE_ALL>();
+
+        Compute(cLocal, a2Local, b2Local);
+
+        AscendC::PipeBarrier<PIPE_ALL>();
+        CopyOut(cLocal);
+    }
+
+private:
+    // 搬入函数，完成矩阵A从GM到L1的CopyIn任务
+    __aicore__ inline void CopyInA(...) ()
+    {
+        // ...
+    }
+    // 搬入函数，完成矩阵B从GM到L1的CopyIn任务
+    __aicore__ inline void CopyInB(..) ()
+    {
+        // ...
+    }
+    // 搬入函数，完成矩阵A从L1到L0A的Split任务
+    __aicore__ inline void DataLoadA(...) ()
+    {
+        // ...
+    }
+    // 搬入函数，完成矩阵B从L1到L0B的Split任务
+    __aicore__ inline void DataLoadB(...) ()
+    {
+        // ...
+    }
+    // 计算函数，完成L0上的计算任务
+    __aicore__ inline void Compute(...) ()
+    {
+        // ...
+    }
+    // 搬出函数，完成矩阵C从L0C到GM的CopyOut任务
+    __aicore__ inline void CopyOut(...) ()
+    {
+        // ...
+    }
+
+private:
+    // 私有成员变量
+    // ...
+};
+```
+
+> [!NOTE]说明
+> CopyIn、DataLoad、Compute和CopyOut四个阶段的操作分别在不同的硬件流水线上执行。为保证数据依赖正确——即每个阶段读取的数据必须由前一阶段写入完毕，需要在各阶段之间设置同步屏障。这里使用全局流水同步[PipeBarrier](../../../../api/SIMD-API/basic_api/sync_control/intra_core_sync/PipeBarrier_ISASI.md)。

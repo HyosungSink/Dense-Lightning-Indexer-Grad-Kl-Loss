@@ -1,0 +1,125 @@
+# 函数<a name="ZH-CN_TOPIC_0000002541491859"></a>
+
+## 核函数（Kernel）参数列表限制<a name="section_kernel_function_argument_list_constraint"></a>
+
+核函数（Kernel）的参数列表（argument list）仅支持以下类型：
+
+- 基础数据类型，如int32\_t、float等。
+- 基础数据类型组成的结构体，支持嵌套结构体形式，但必须为POD（Plain Old Data）类型。
+- 基础数据类型的指针类型，如int32\_t\*、float\*等，实际上这些指针指向的是Global Memory内存。
+
+## SIMT VF函数限制<a name="section_simt_vf_constraint"></a>
+
+\_\_simt\_vf\_\_标记的SIMT VF函数需要遵循以下约束和限制：
+
+-   标量参数不允许使用指针和引用。
+-   不允许将栈数组作为参数传入SIMT VF函数；SIMT VF函数的指针形参必须显式使用`__gm__`或`__ubuf__`地址空间限定符。以下错误示例会在编译期报错。
+
+    ```cpp
+    __simt_vf__ __launch_bounds__(1024) inline void foo(__gm__ int* a, __gm__ int* b, __gm__ int* c, int* array) {
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        a[idx] = b[idx] + c[idx] + array[0];
+    }
+    __global__ __aicore__ void foo(__gm__ int* a, __gm__ int* b, __gm__ int* c) {
+        int array[5] = {0,1,2,3,4};
+        asc_vf_call<foo>(dim3{256}, a, b, c, array); // error: cannot initialize a parameter of type '__gm__ int *' with an lvalue of type 'int[5]'
+    }
+    ```
+
+-   如果传参中出现多级指针，不允许使用内层栈地址指针访问，以下为错误示例。
+
+    ```cpp
+    __simt_vf__ __launch_bounds__(1024) inline void foo(__gm__ int* a, __gm__ int* b, __gm__ int* c, __ubuf__ uint64_t* s) {
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        int* stack = (int*)(s[0]);
+        // error: *stack表示从多级指针中读取，不允许使用
+        a[idx] = b[idx] + c[idx] + *stack;
+    }
+    __global__ __aicore__ void foo(__gm__ int* a, __gm__ int* b, __gm__ int* c) {
+        int stack = 0;
+        __ubuf__ uint64_t* s = ...;
+        s[0] = &stack;
+        asc_vf_call<foo>(dim3{256}, a, b, c, s);
+    }
+    ```
+
+-   不支持通过函数指针进行间接调用，被调用的\_\_simt\_vf\_\_函数需要在编译期确定。
+-   函数的inline行为由编译器决定，添加的always\_inline或noinline将被忽略。
+-   不允许使用结构体作为参数，以下为错误示例。
+
+    ```cpp
+    __simt_vf__ __launch_bounds__(1024) inline void foo(__gm__ int* a, __gm__ int* b, __gm__ int* c, struct S s) {
+        // error: s表示结构体参数，不允许使用
+    }
+    ```
+
+## SIMD与SIMT混合编程场景结构体使用限制
+
+SIMD与SIMT混合编程场景下，当使用位于Global Memory或Unified Buffer（UB）中的结构体或类拷贝构造新结构体或类时，需要开发者为结构体或类手动实现拷贝构造函数，编译器不会默认隐式生成。
+
+```cpp
+struct TestS {
+    int a;
+    float b;
+    // 手动实现Global Memory内存空间的拷贝构造函数
+    __callee__ TestS(const __gm__ TestS& other) {
+        a = other.a;
+        b = other.b;
+    }
+    // 手动实现UB内存空间的拷贝构造函数
+    __callee__ TestS(const __ubuf__ TestS& other) {
+        a = other.a;
+        b = other.b;
+    }
+};
+
+__simt_vf__ void simt_kernel(__gm__ TestS *data1, __ubuf__ TestS *data2)
+{
+    uint32_t idx = threadIdx.x;
+    TestS t1 = data1[idx];   // 调用Global Memory拷贝构造函数
+    TestS t2 = data2[idx];   // 调用UB拷贝构造函数
+    ...
+}
+```
+
+在异构编译场景中，Host和Device可共用结构体定义代码，但Host侧无法识别`__callee__`、`__gm__`等Device侧关键字，因此无法根据这些关键字实现函数重载。当需要定义多个地址空间重载函数时，需通过宏`__NPU_ARCH__`将相关Device代码隔离，以避免函数定义冲突。`__NPU_ARCH__`是由编译预定义的宏，可用于区分Device侧代码，具体可参考[《毕昇编译器》](https://www.hiascend.com/document/redirect/CannCommunityBiSheng)中的“基本编程指导 > AI Core编程指导 > 预定义宏和内建变量”章节。
+
+此外，SIMD与SIMT混合编程场景下不支持直接向Global Memory或UB地址空间写入结构体。
+
+```cpp
+struct TestS {
+    int a;
+    float b;
+    //device 侧代码隔离
+#ifdef __NPU_ARCH__
+    __callee__ TestS(const __gm__ TestS& other) {
+        a = other.a;
+        b = other.b;
+    }
+    __callee__ TestS(const __ubuf__ TestS& other) {
+        a = other.a;
+        b = other.b;
+    }
+#endif
+    // host 侧代码
+    TestS(const TestS& other) {
+        a = other.a;
+        b = other.b;
+    }
+};
+
+__simt_vf__ void simt_kernel(__gm__ TestS *data1, __ubuf__ TestS *data2)
+{
+    uint32_t idx = threadIdx.x;
+    TestS t1 = data1[idx];      // 调用Global Memory拷贝构造函数
+    data2[0] = t;               // 不支持，编译报错
+    ...
+}
+
+__global__ __vector__ void kernel_func(__gm__ TestS *data1, __gm__ TestS *data2)
+{
+    TestS t = data1[0];         // 调用Global Memory拷贝构造函数
+    data2[0] = t;               // 不支持，编译报错
+    ...
+}
+```

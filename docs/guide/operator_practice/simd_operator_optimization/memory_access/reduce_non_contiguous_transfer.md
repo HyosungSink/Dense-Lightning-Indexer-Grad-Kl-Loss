@@ -1,0 +1,139 @@
+# 非连续搬运场景减少搬运次数<a name="ZH-CN_TOPIC_0000002529778475"></a>
+
+【优先级】中
+
+>[!NOTE]说明 
+>该性能优化建议适用于如下产品型号：
+><!-- npu="950" id1 -->
+>- Ascend 950PR/Ascend 950DT
+><!-- end id1 -->
+
+在非连续搬运场景可以使用DataCopyPad接口的Loop模式和DataCopy的多维数据搬运接口来减少搬运次数，优化搬运性能。
+
+## 使用Loop模式减少非连续搬运的次数<a name="section191811840221"></a>
+
+【描述】DataCopyPad接口在Normal/Compact模式基础上，可以使用Loop模式搬运二维数据，假设我们希望以下图的方式搬运8个48B大小的数据块：
+
+![](../../../figures/copy_opt.png)
+
+【反例】调用多次搬运接口进行搬运（以DataCopyPad为例）
+
+```
+__aicore__ inline void CopyIn3(){
+    AscendC::LocalTensor<T> xLocal = inQueueX.AllocTensor<T>();
+    AscendC::Duplicate<T>(xLocal, 0, count);
+    AscendC::DataCopyParams dataCopyParams;
+    dataCopyParams.blockCount = 2;
+    dataCopyParams.blockLen = 48;
+    dataCopyParams.srcStride = 0;
+    dataCopyParams.dstStride = 0;
+    AscendC::DataCopyPadParams dataCopyPadParams;
+    dataCopyPadParams.isPad = 0;
+    dataCopyPadParams.leftPadding = 0;
+    dataCopyPadParams.rightPadding = 0;
+    dataCopyPadParams.paddingValue = 0;
+    AscendC::DataCopyPad<T, AscendC::PaddingMode::Compact>(xLocal, xGm, dataCopyParams, dataCopyPadParams);
+    AscendC::DataCopyPad<T, AscendC::PaddingMode::Compact>(xLocal[32], xGm[24], dataCopyParams, dataCopyPadParams);
+    AscendC::DataCopyPad<T, AscendC::PaddingMode::Compact>(xLocal[72], xGm[48], dataCopyParams, dataCopyPadParams);
+    AscendC::DataCopyPad<T, AscendC::PaddingMode::Compact>(xLocal[104], xGm[72], dataCopyParams, dataCopyPadParams);
+    inQueueX.EnQue<T>(xLocal);
+}
+```
+
+**图1**  使用多次DataCopyPad接口进行搬运<a name="fig345313593314"></a>  
+![](../../../figures/dcpad_api.png "使用多次DataCopyPad接口进行搬运")
+
+【正例】使用Loop模式进行搬运
+
+```
+__aicore__ inline void CopyIn3(){
+    AscendC::LoopModeParams loopModeParams;
+    loopModeParams.loop1Size = 2;
+    loopModeParams.loop2Size = 2;
+    loopModeParams.loop1SrcStride = 96;
+    loopModeParams.loop1DstStride = 128;
+    loopModeParams.loop2SrcStride = 192;
+    loopModeParams.loop2DstStride = 288;
+    AscendC::LocalTensor<T> xLocal = inQueueX.AllocTensor<T>();
+    AscendC::Duplicate<T>(xLocal, 0, count);
+    AscendC::DataCopyParams dataCopyParams;
+    dataCopyParams.blockCount = 2;
+    dataCopyParams.blockLen = 48;
+    dataCopyParams.srcStride = 0;
+    dataCopyParams.dstStride = 0;
+    AscendC::DataCopyPadParams dataCopyPadParams;
+    dataCopyPadParams.isPad = 0;
+    dataCopyPadParams.leftPadding = 0;
+    dataCopyPadParams.rightPadding = 0;
+    dataCopyPadParams.paddingValue = 0;
+    AscendC::SetLoopModePara(loopModeParams, AscendC::DataCopyMVType::OUT_TO_UB);
+    AscendC::DataCopyPad<T, AscendC::PaddingMode::Compact>(xLocal, xGm, dataCopyParams, dataCopyPadParams);
+    AscendC::ResetLoopModePara(AscendC::DataCopyMVType::OUT_TO_UB);
+    inQueueX.EnQue<T>(xLocal);
+}
+```
+
+**图2**  使用Loop模式进行搬运<a name="fig26533539233"></a>  
+![](../../../figures/loop_copy.png "使用Loop模式进行搬运")
+
+【总结】当数据块之间需要插入不同大小Padding时，使用Loop模式搬运代替多次的DataCopyPad能够减少搬运指令的使用，提升性能。
+
+## 使用多维数据搬运减少非连续搬运次数<a name="section1229601461213"></a>
+
+【描述】假设我们希望以下图的方式搬运2个8B大小的数据块：
+
+**图3**  搬运前后数据<a name="fig20466223158"></a>  
+![](../../../figures/copy_data.png "搬运前后数据")
+
+【反例】使用多次DataCopyPad进行搬运
+
+**图4**  使用多次DataCopyPad进行搬运<a name="fig18188132522410"></a>  
+![](../../../figures/dcpad_copy.png "使用多次DataCopyPad进行搬运")
+
+```
+__aicore__ inline void CopyIn5(){
+    AscendC::LocalTensor<T> xLocal = inQueueX.AllocTensor<T>();
+    AscendC::Duplicate<T>(xLocal, 0, count);
+    AscendC::DataCopyParams dataCopyParams;
+    dataCopyParams.blockCount = 1;
+    dataCopyParams.blockLen = 8;
+    dataCopyParams.srcStride = 0;
+    dataCopyParams.dstStride = 0;
+    AscendC::DataCopyPadParams dataCopyPadParams;
+    dataCopyPadParams.isPad = 1;
+    dataCopyPadParams.leftPadding = 5;
+    dataCopyPadParams.rightPadding = 1;
+    dataCopyPadParams.paddingValue = 0;
+    // 第一次搬运
+    AscendC::DataCopyPad<T, AscendC::PaddingMode::Normal>(xLocal, xGm, dataCopyParams, dataCopyPadParams);
+    dataCopyPadParams.isPad = 1;
+    dataCopyPadParams.leftPadding = 1;
+    dataCopyPadParams.rightPadding = 5;
+    dataCopyPadParams.paddingValue = 0;
+    // 第二次搬运
+    AscendC::DataCopyPad<T, AscendC::PaddingMode::Normal>(xLocal[8], xGm[2], dataCopyParams, dataCopyPadParams);
+    inQueueX.EnQue<T>(xLocal);
+}
+```
+
+【正例】使用多维数据搬运
+
+DataCopy接口在Ascend 950PR/Ascend 950DT上支持多维数据的搬运，具体可参考[DataCopy（GMToUB多维数据搬运NDDMA）](../../../../api/SIMD-API/basic_api/memory_vector_compute/data_move/DataCopy_GMToUB_NDDMA.md)。以2D场景的搬运为例，代码如下：
+
+```cpp
+__aicore__ inline void CopyIn6(){
+    AscendC::LocalTensor<T> xLocal = inQueueX.AllocTensor<T>();
+    AscendC::Duplicate<T>(xLocal, 0, count);
+    AscendC::NdDmaLoopInfo<2> loopInfo{{1, 2}, {1, 4}, {2, 2}, {1, 1}, {1, 1}};
+    AscendC::NdDmaParams<T, 2> params = {loopInfo, 0};
+    AscendC::NdDmaDci();
+    static constexpr AscendC::NdDmaConfig config = {false};
+    AscendC::DataCopy<T, 2, config>(xLocal, xGm, params);
+    inQueueX.EnQue<T>(xLocal);
+}
+```
+
+**图5**  搬运前后数据<a name="fig284018179396"></a>  
+![](../../../figures/copy_data_56.png "搬运前后数据-56")
+
+【总结】使用多维数据搬运在部分场景下能够减少搬运指令的条数，从而提升性能。

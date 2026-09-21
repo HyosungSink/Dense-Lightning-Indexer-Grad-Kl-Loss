@@ -1,0 +1,77 @@
+# \_\_int2half\_rna\_sat
+
+## 产品支持情况
+
+<!-- npu="950" id1 -->
+- Ascend 950PR/Ascend 950DT：支持
+<!-- end id1 -->
+<!-- npu="A3" id2 -->
+- Atlas A3 训练系列产品/Atlas A3 推理系列产品：不支持
+<!-- end id2 -->
+<!-- npu="910b" id3 -->
+- Atlas A2 训练系列产品/Atlas A2 推理系列产品：不支持
+<!-- end id3 -->
+<!-- npu="310b" id4 -->
+- Atlas 200I/500 A2 推理产品：不支持
+<!-- end id4 -->
+<!-- npu="310p" id5 -->
+- Atlas 推理系列产品AI Core：不支持
+- Atlas 推理系列产品Vector Core：不支持
+<!-- end id5 -->
+<!-- npu="910" id6 -->
+- Atlas 训练系列产品：不支持
+<!-- end id6 -->
+<!-- @ref: asc-devkit/res/docs/zh/api/SIMT-API/math_functions/half_type/half_precision_conversion_functions/__int2half_rna_sat_res.md#id1 -->
+
+## 功能说明
+
+将int32类型数据转换为half类型数据，并遵循CAST\_ROUND模式，返回转换后的值。
+
+## 函数原型
+
+```cpp
+inline half __int2half_rna_sat(const int x)
+```
+
+## 参数说明
+
+**表1**  参数说明
+
+| 参数名 | 输入/输出 | 描述 |
+| --- | --- | --- |
+| x | 输入 | 源操作数。 |
+
+## 返回值说明
+
+遵循CAST\_ROUND模式，将输入int32数据转换成的half数据。特殊值如下：
+
+| x值 | 返回值 |
+| --- | --- |
+| 0 | 0 |
+| 2147483647（int32_t最大值） | ASCRT\_MAX\_NORMAL\_FP16 |
+| -2147483648（int32_t最小值） | -ASCRT\_MAX\_NORMAL\_FP16 |
+| \|x\|>ASCRT\_MAX\_NORMAL\_FP16 | ±ASCRT\_MAX\_NORMAL\_FP16 |
+
+## 约束说明
+
+SIMT编程场景由于无法设置CTRL寄存器，本接口的饱和模式不生效。
+
+## 需要包含的头文件
+
+使用该接口需要包含"simt\_api/asc\_fp16.h"头文件。
+
+```cpp
+#include "simt_api/asc_fp16.h"
+```
+
+## 调用示例
+
+-   SIMD与SIMT混合编程场景：
+
+    ```cpp
+    __simt_vf__ __launch_bounds__(1024) inline void kernel__int2half_rna_sat(__gm__ half* dst, __gm__ int32_t* x)
+    {
+        int idx = threadIdx.x + blockIdx.x * blockDim.x;
+        dst[idx] = __int2half_rna_sat(x[idx]);
+    }
+    ```

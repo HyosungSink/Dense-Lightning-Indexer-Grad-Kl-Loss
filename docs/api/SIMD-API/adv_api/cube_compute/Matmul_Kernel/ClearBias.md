@@ -1,0 +1,61 @@
+# ClearBias
+
+## 产品支持情况
+
+<!-- npu="950" id2 -->
+- Ascend 950PR/Ascend 950DT：支持
+<!-- end id2 -->
+<!-- npu="A3" id3 -->
+- Atlas A3 训练系列产品/Atlas A3 推理系列产品：支持
+<!-- end id3 -->
+<!-- npu="910b" id4 -->
+- Atlas A2 训练系列产品/Atlas A2 推理系列产品：支持
+<!-- end id4 -->
+<!-- npu="310b" id5 -->
+- Atlas 200I/500 A2 推理产品：支持
+<!-- end id5 -->
+<!-- npu="310p" id6 -->
+- Atlas 推理系列产品AI Core：支持
+- Atlas 推理系列产品Vector Core：不支持
+<!-- end id6 -->
+<!-- npu="910" id7 -->
+- Atlas 训练系列产品：不支持
+<!-- end id7 -->
+<!-- npu="x90" id1 -->
+- Kirin X90：支持
+<!-- end id1 -->
+<!-- @ref: asc-devkit/res/docs/zh/api/SIMD-API/adv_api/cube_compute/Matmul_Kernel/ClearBias_res.md#id1 -->
+
+## 功能说明
+
+[DisableBias](DisableBias.md)接口与该接口的功能相同，建议使用[DisableBias](DisableBias.md)。
+
+清除Bias标志位，表示Matmul计算时没有Bias参与。如果在调用[Init](Init.md)时配置了TCubeTiling结构中的isBias参数来启用Bias，调用该接口后，会清除Bias标志位，不再启用Bias。
+
+## 函数原型
+
+```
+__aicore__ inline void ClearBias()
+```
+
+## 参数说明
+
+无
+
+## 返回值说明
+
+无
+
+## 约束说明
+
+无
+
+## 调用示例
+
+```
+REGIST_MATMUL_OBJ(&pipe, GetSysWorkSpacePtr(), mm, &tiling);
+mm.SetTensorA(gm_a);
+mm.SetTensorB(gm_b);
+mm.ClearBias();    // 清除tiling中的Bias标志位
+mm.IterateAll(gm_c);
+```

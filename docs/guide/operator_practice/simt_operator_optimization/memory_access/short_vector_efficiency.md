@@ -1,0 +1,84 @@
+# 使用短向量类型提升效率
+
+【优先级】中
+
+【描述】SIMT编程模式下，使用短向量类型替代普通数据类型以提升算子执行效率。AI处理器以Cache Line为128字节访问L2 Cache，当处理内存占用两字节的数据类型时，单个Warp对连续数据进行合并访存的有效数据量仅为64字节，未达到单个Cache Line的数据长度，带宽利用率为50%。通过使用短向量类型进行数据搬运和计算，每个Warp内线程的单次合并访存可覆盖整个Cache Line，利用100%的带宽，显著提升整体访存效率。
+
+【样例介绍】以[向量加法算子](../../../../../../examples/03_simt_api/03_best_practices/00_memory_optimizations/short_vector_add)为例，输入数据为half类型，计算公式为 $z_i = x_i + y_i$。数据规模为64×256×1024个元素，算子内配置64个线程块、每个线程块内1024个线程，总线程数65536，每个线程处理256个元素。相同配置下，使用half2短向量类型处理输入数据，每个线程处理128个元素。
+
+  【反例】使用half类型逐元素计算，Cache Line占用不满。
+   
+   **图1** half类型计算带宽示意图
+
+   ![img](../../../figures/half_bandwidth.png "half类型单warp带宽")
+
+  ```cpp
+  template<typename T>
+  __global__ void add(T* x, T* y, T* z, uint64_t size)
+  {
+      int32_t stride = gridDim.x * blockDim.x;
+      for (int32_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size; idx += stride) {
+          z[idx] = x[idx] + y[idx];
+      }
+  }
+  ```
+
+  在上述实现中，由于采用标量half（2B）数据类型，单个Warp（32线程）合并访存所生成的物理连续地址请求宽度仅为64B，128B的Cache Line未被完全占用。
+
+  在Ascend 950PR产品上，该实现的性能数据如下：
+
+  | Task Duration(μs) | aiv_time(μs) | aiv_total_cycles | aiv_vec_time(μs) | aiv_vec_ratio | aiv_scalar_time(μs) | aiv_scalar_ratio | aiv_read_hit_rate | aiv_write_hit_rate | aiv_main_mem_read_bw(GB/s) | aiv_main_mem_write_bw(GB/s) |
+  |:-----------------:|:------------:|:----------------:|:----------------:|:-------------:|:-------------------:|:----------------:|:-----------------:|:------------------:|:--------------------------:|:---------------------------:|
+  |      86.478       |    86.217    |     8832432      |      85.735      |     0.995     |        0.47         |      0.005       |         0         |       0.493        |            7.77            |            6.24             |
+
+  从性能数据可以看出，读带宽为7.77 GB/s，写带宽为6.24 GB/s。
+
+  【正例】使用half2类型计算，提升带宽利用率。
+
+  **图2** half2类型计算带宽示意图
+
+  ![img](../../../figures/half2_bandwidth.png "短向量带宽示意图")
+  ```cpp
+  template<typename T, typename U>
+  __global__ void add2(T* x, T* y, T* z, uint64_t size)
+  {
+      // 转为向量类型
+      const U* x2 = reinterpret_cast<const U*>(x);
+      const U* y2 = reinterpret_cast<const U*>(y);
+      U* z2 = reinterpret_cast<U*>(z);
+
+      uint64_t vectorSize = size / 2;
+      int32_t stride = gridDim.x * blockDim.x;
+
+      // 短向量循环处理偶数对
+      for (int32_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < vectorSize; idx += stride) {
+          z2[idx] = x2[idx] + y2[idx];
+      }
+      // 最后一个奇数元素处理
+      if (blockIdx.x == 0 && threadIdx.x == 0 && (size % 2 != 0)) {
+          uint64_t lastIdx = size - 1;
+          z[lastIdx] = x[lastIdx] + y[lastIdx];
+      }
+  }
+  ```
+
+  上述实现将half类型提升为4字节的half2类型进行计算，单个Warp单次写入的数据量达到`32 * 4B = 128B`，恰好覆盖一行Cache Line。
+
+  在Ascend 950PR产品上，使用half2类型后的性能数据如下：
+
+  | Task Duration(μs) | aiv_time(μs) | aiv_total_cycles | aiv_vec_time(μs) | aiv_vec_ratio | aiv_scalar_time(μs) | aiv_scalar_ratio | aiv_read_hit_rate | aiv_write_hit_rate | aiv_main_mem_read_bw(GB/s) | aiv_main_mem_write_bw(GB/s) |
+  |:-----------------:|:------------:|:----------------:|:----------------:|:-------------:|:-------------------:|:----------------:|:-----------------:|:------------------:|:--------------------------:|:---------------------------:|
+  |      45.371       |    45.111    |     4584309      |      44.582      |     0.988     |        0.517        |      0.011       |         0         |       0.891        |           14.51            |            7.25             |
+
+  **优化效果分析**：
+
+  - **端到端耗时**：从86.478 μs降至45.371 μs，减少47.5%，整体性能提升1.91倍。
+  - **AI Vector总周期数**：从8,832,432减至4,584,309，降幅达48.1%，证明指令发射数量得到精简。
+  - **主存读写带宽**：读带宽从7.77 GB/s提升至14.51 GB/s，提升86.7%；写带宽从6.24 GB/s提升至7.25 GB/s，提升16.2%。
+
+  **适用场景扩展**
+
+  短向量类型不局限于half2，关于更多支持类型，请参见完整[短向量类型列表](../../../../api/SIMT-API/SIMT_programming_intro/extended_syntax/builtin_data_types.md#短向量类型)。对于短向量类型支持的运算符，请参考[SIMT BuiltIn关键字章节](../../../programming_guide/language_extension/simt_builtin_keywords.md#运算符)。
+  
+
+【总结】在SIMT算子中，通过利用[短向量数据类型](../../../../api/SIMT-API/SIMT_programming_intro/extended_syntax/builtin_data_types.md#短向量类型)，单个Warp的带宽利用率可以达到100%，同时精简发射指令数量，显著提升整体访存效率。

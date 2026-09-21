@@ -1,0 +1,271 @@
+# 基础矢量算子<a name="ZH-CN_TOPIC_0000002532228157"></a>
+
+基于Ascend C方式实现基础矢量算子核函数（Kernel）的流程如下图所示。
+
+**图1**  矢量算子核函数（Kernel）实现流程<a name="zh-cn_topic_0000002201157438_fig16061570280"></a><br>
+![](../../../figures/vec_op_impl.png "矢量算子核函数（Kernel）实现流程")
+
+-   算子分析：分析算子的数学表达式、输入、输出以及计算逻辑的实现，明确需要调用的Ascend C接口。
+-   核函数（Kernel）定义：定义Ascend C算子入口函数。
+-   根据[矢量编程范式](../../../programming_guide/programming_model/ai_core_simd_programming/tpipe_tque_programming/tpipe_tque_paradigm.md#section116515238815)实现算子类：完成核函数（Kernel）的内部实现，包括3个基本任务：CopyIn，Compute，CopyOut。
+
+下文以输入为half数据类型且shape的最后一维为32Bytes对齐、在单核上运行的、一次完成计算的Add算子为例，对上述步骤进行详细介绍。
+
+## 算子分析<a name="zh-cn_topic_0000002201157438_section4870456573"></a>
+
+算子分析具体步骤如下：
+
+1.  明确算子的数学表达式及计算逻辑。
+
+    Add算子的数学表达式为：
+
+    ```
+    z = x + y
+    ```
+
+    计算逻辑是：Ascend C提供的[矢量计算接口](../../../../api/SIMD-API/basic_api/memory_vector_compute/basic_arithmetic/Add.md)的操作元素都为[LocalTensor](../../../../api/SIMD-API/basic_api/data_structures/LocalTensor/LocalTensor.md)，输入数据需要先从外部存储（Global Memory）搬运到Unified Buffer（UB），然后使用计算接口完成两个输入参数相加，得到最终结果，再搬出到外部存储上。Ascend C  Add算子的计算逻辑如下图所示。
+
+    **图2**  算子计算逻辑<a name="zh-cn_topic_0000002201157438_zh-cn_topic_0000001464091780_fig18937134755411"></a>  
+    ![](../../../figures/op_logic.png "算子计算逻辑")
+
+2.  明确输入和输出。
+    -   Add算子有两个输入：x与y；输出为z。
+    -   本样例中算子的输入支持的数据类型为half（float16），算子输出的数据类型与输入的数据类型相同。
+    -   算子输入支持的shape为（1，2048），输出shape与输入shape相同。
+    -   算子输入支持的[format](../../../technical_appendix/concepts_and_terms/neural_networks_and_operators/data_layout.md)为：ND。
+
+3.  确定核函数（Kernel）名称和参数。
+    -   您可以自定义核函数（Kernel）名称，本样例中核函数（Kernel）命名为vec\_add\_custom。
+    -   根据对算子输入输出的分析，确定核函数（Kernel）有3个参数x，y，z；x，y为输入在Global Memory上的内存地址，z为输出在Global Memory上的内存地址。
+
+4.  确定算子实现所需接口。
+    -   实现涉及外部存储和内部存储间的数据搬运，查看Ascend C  API参考中的数据搬运接口，需要使用[DataCopy](../../../../api/SIMD-API/basic_api/data_move_guide/overview/data_move_concept.md)来实现数据搬运。
+    -   本样例只涉及矢量计算的加法操作，查看Ascend C  API参考中的[矢量计算](../../../../api/SIMD-API/basic_api/memory_vector_compute/memory_vector_compute.md)接口，初步分析可使用基础算术Add接口[Add](../../../../api/SIMD-API/basic_api/memory_vector_compute/basic_arithmetic/Add.md)实现x+y。
+    -   使用[Queue队列](../../../../api/SIMD-API/basic_api/resource_management/TQue/TQue_intro.md)管理计算中使用的Tensor数据结构，具体使用[EnQue](../../../../api/SIMD-API/basic_api/resource_management/TQue/EnQue.md)、[DeQue](../../../../api/SIMD-API/basic_api/resource_management/TQue/DeQue.md)等接口。
+
+通过以上分析，得到Ascend C  Add算子的设计规格如下：
+
+-   算子类型（OpType）：Add
+-   算子输入输出：
+
+    **表1**  Add算子输入输出规格
+
+    <a name="table4934296305"></a>
+    <table><thead align="left"><tr id="row59358913304"><th class="cellrowborder" valign="top" width="25%" id="mcps1.2.5.1.1"><p id="p5503181819300"><a name="p5503181819300"></a><a name="p5503181819300"></a><strong id="b1850331853010"><a name="b1850331853010"></a><a name="b1850331853010"></a>name</strong></p>
+    </th>
+    <th class="cellrowborder" valign="top" width="25%" id="mcps1.2.5.1.2"><p id="p1550381833017"><a name="p1550381833017"></a><a name="p1550381833017"></a><strong id="b7503171811309"><a name="b7503171811309"></a><a name="b7503171811309"></a>shape</strong></p>
+    </th>
+    <th class="cellrowborder" valign="top" width="25%" id="mcps1.2.5.1.3"><p id="p1950391883014"><a name="p1950391883014"></a><a name="p1950391883014"></a><strong id="b2503111803020"><a name="b2503111803020"></a><a name="b2503111803020"></a>data type</strong></p>
+    </th>
+    <th class="cellrowborder" valign="top" width="25%" id="mcps1.2.5.1.4"><p id="p14503218133015"><a name="p14503218133015"></a><a name="p14503218133015"></a><strong id="b8503141818301"><a name="b8503141818301"></a><a name="b8503141818301"></a>format</strong></p>
+    </th>
+    </tr>
+    </thead>
+    <tbody><tr id="row393589203016"><td class="cellrowborder" valign="top" width="25%" headers="mcps1.2.5.1.1 "><p id="p1950331810308"><a name="p1950331810308"></a><a name="p1950331810308"></a>x（输入）</p>
+    </td>
+    <td class="cellrowborder" valign="top" width="25%" headers="mcps1.2.5.1.2 "><p id="p1950321863013"><a name="p1950321863013"></a><a name="p1950321863013"></a>(1, 2048)</p>
+    </td>
+    <td class="cellrowborder" valign="top" width="25%" headers="mcps1.2.5.1.3 "><p id="p135031118173010"><a name="p135031118173010"></a><a name="p135031118173010"></a>half</p>
+    </td>
+    <td class="cellrowborder" valign="top" width="25%" headers="mcps1.2.5.1.4 "><p id="p19503131815305"><a name="p19503131815305"></a><a name="p19503131815305"></a>ND</p>
+    </td>
+    </tr>
+    <tr id="row6935119173013"><td class="cellrowborder" valign="top" width="25%" headers="mcps1.2.5.1.1 "><p id="p75031182305"><a name="p75031182305"></a><a name="p75031182305"></a>y（输入）</p>
+    </td>
+    <td class="cellrowborder" valign="top" width="25%" headers="mcps1.2.5.1.2 "><p id="p16503111873010"><a name="p16503111873010"></a><a name="p16503111873010"></a>(1, 2048)</p>
+    </td>
+    <td class="cellrowborder" valign="top" width="25%" headers="mcps1.2.5.1.3 "><p id="p45031818103018"><a name="p45031818103018"></a><a name="p45031818103018"></a>half</p>
+    </td>
+    <td class="cellrowborder" valign="top" width="25%" headers="mcps1.2.5.1.4 "><p id="p1503918103012"><a name="p1503918103012"></a><a name="p1503918103012"></a>ND</p>
+    </td>
+    </tr>
+    <tr id="row59354943016"><td class="cellrowborder" valign="top" width="25%" headers="mcps1.2.5.1.1 "><p id="p1450316186305"><a name="p1450316186305"></a><a name="p1450316186305"></a>z（输出）</p>
+    </td>
+    <td class="cellrowborder" valign="top" width="25%" headers="mcps1.2.5.1.2 "><p id="p1150361853017"><a name="p1150361853017"></a><a name="p1150361853017"></a>(1, 2048)</p>
+    </td>
+    <td class="cellrowborder" valign="top" width="25%" headers="mcps1.2.5.1.3 "><p id="p15503918173017"><a name="p15503918173017"></a><a name="p15503918173017"></a>half</p>
+    </td>
+    <td class="cellrowborder" valign="top" width="25%" headers="mcps1.2.5.1.4 "><p id="p1503101813012"><a name="p1503101813012"></a><a name="p1503101813012"></a>ND</p>
+    </td>
+    </tr>
+    </tbody>
+    </table>
+
+-   核函数（Kernel）名称：vec\_add\_custom
+-   使用的主要接口：
+    -   DataCopy：数据搬移接口
+    -   Add：矢量基础算术接口
+    -   EnQue、DeQue等接口：Queue队列管理接口
+
+-   算子实现文件名称：vector\_add.asc
+
+## 核函数（Kernel）定义<a name="zh-cn_topic_0000002201157438_section58723515714"></a>
+
+根据[核函数（Kernel）](../../../programming_guide/programming_model/ai_core_simd_programming/kernel_function.md)中介绍的规则进行核函数（Kernel）的定义。
+
+1.  函数原型定义
+
+    本样例中，函数名为vector\_add\_custom（核函数（Kernel）名称可自定义），根据[算子分析](#zh-cn_topic_0000002201157438_section4870456573)中对算子输入输出的分析，确定有3个参数x，y，z，其中x，y为输入内存，z为输出内存。根据[核函数（Kernel）](../../../programming_guide/programming_model/ai_core_simd_programming/kernel_function.md#zh-cn_topic_0000001447989210_section1915102519220)的规则介绍，函数原型定义如下所示：使用\_\_global\_\_函数类型限定符标识它是一个核函数（Kernel），可以被<<<\>\>\>调用；使用\_\_vector\_\_函数类型限定符标识该核函数（Kernel）在设备端aicore的Vector Core上执行。
+
+    ```
+    __global__ __vector__ void vector_add_custom(__gm__ uint8_t* x, __gm__ uint8_t* y, __gm__ uint8_t* z)
+    {
+    }
+    ```
+
+2.  调用算子类的Init和Process函数。
+
+    算子类的Init函数，完成内存初始化相关工作，Process函数完成算子实现的核心逻辑，具体介绍参见[算子类实现](#zh-cn_topic_0000002201157438_section10423482111)。
+
+    ```
+    __global__ __vector__ void vector_add_custom(__gm__ uint8_t* x, __gm__ uint8_t* y, __gm__ uint8_t* z)
+    {
+        AscendC::TPipe pipe;
+        KernelAdd op;
+        op.Init(x, y, z, &pipe);
+        op.Process();
+    }
+    ```
+
+3.  根据[核函数（Kernel）定义和调用](../../../programming_guide/programming_model/ai_core_simd_programming/kernel_function.md#zh-cn_topic_0000001447989210_section1915102519220)章节，调用核函数（Kernel）时，除了需要传入参数x，y，z，还需要传入numBlocks（核函数（Kernel）执行的核数）、动态UB大小（无动态UB需求时设置为0）、stream（应用程序中维护异步操作执行顺序的stream）来规定核函数（Kernel）的执行配置。
+
+    ```
+    vector_add_custom<<<numBlocks, 0, stream>>>(xDevice, yDevice, zDevice);
+    ```
+
+## 算子类实现<a name="zh-cn_topic_0000002201157438_section10423482111"></a>
+
+根据上一节介绍，核函数（Kernel）中会调用算子类的Init和Process函数，本节具体讲解如何基于编程范式实现算子类。
+
+根据矢量编程范式对Add算子的实现流程进行设计的思路如下，矢量编程范式请参考[矢量编程范式](../../../programming_guide/programming_model/ai_core_simd_programming/tpipe_tque_programming/tpipe_tque_paradigm.md#section116515238815)，设计完成后得到的Add算子实现流程图参见[图3 Add算子实现流程](#zh-cn_topic_0000002201157438_fig4134406304)：
+
+-   Add算子的实现流程分为3个基本任务：CopyIn，Compute，CopyOut。CopyIn任务负责将Global Memory上的输入Tensor xGm和yGm搬运至Local Memory，分别存储在xLocal，yLocal，Compute任务负责对xLocal，yLocal执行加法操作，计算结果存储在zLocal中，CopyOut任务负责将输出数据从zLocal搬运至Global Memory上的输出Tensor zGm中。
+-   CopyIn，Compute任务间通过UB（VECIN）队列inQueueX，inQueueY进行同步，Compute，CopyOut任务间通过UB（VECOUT）队列outQueueZ进行同步。
+-   任务间交互使用到的内存、临时变量的内存统一使用[Pipe内存管理对象](../../../../api/SIMD-API/basic_api/resource_management/TPipe/TPipe.md)进行管理。
+
+**图3**  Add算子实现流程<a name="zh-cn_topic_0000002201157438_fig4134406304"></a>  
+![](../../../figures/add_op.png "Add算子实现流程")
+
+算子类中主要实现上述流程，包含对外开放的初始化Init函数和核心处理函数Process，Process函数中会对上图中的三个基本任务进行调用；同时包括一些算子实现中会用到的私有成员，比如上图中的GlobalTensor（xGm、yGm、zGm）和UB（VECIN/VECOUT）队列等。KernelAdd算子类具体成员如下：
+
+```
+class KernelAdd {
+public:
+    __aicore__ inline KernelAdd() {}
+    // 初始化函数，完成内存初始化相关操作
+    __aicore__ inline void Init(__gm__ uint8_t* x, __gm__ uint8_t* y, __gm__ uint8_t* z, AscendC::TPipe* pipeIn){}
+    // 核心处理函数，实现算子逻辑，调用私有成员函数CopyIn、Compute、CopyOut完成矢量算子的三级流水操作
+    __aicore__ inline void Process(){}
+
+private:
+    // 搬入函数，完成CopyIn阶段的处理，被核心Process函数调用
+    __aicore__ inline void CopyIn(){}
+    // 计算函数，完成Compute阶段的处理，被核心Process函数调用
+    __aicore__ inline void Compute(){}
+    // 搬出函数，完成CopyOut阶段的处理，被核心Process函数调用
+    __aicore__ inline void CopyOut(){}
+
+private:
+    AscendC::TPipe* pipe;  // Pipe内存管理对象
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueX;  // 输入数据Queue队列管理对象，TPosition为VECIN
+    AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueueY;  // 输入数据Queue队列管理对象，TPosition为VECIN
+    AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueueZ;  // 输出数据Queue队列管理对象，TPosition为VECOUT
+    AscendC::GlobalTensor<half> xGm;  // 管理输入输出Global Memory内存地址的对象，其中xGm, yGm为输入，zGm为输出
+    AscendC::GlobalTensor<half> yGm;
+    AscendC::GlobalTensor<half> zGm;
+};
+```
+
+初始化函数主要完成以下内容：
+
+-   设置输入输出Global Tensor的Global Memory内存地址。
+
+    本样例中的分配方案是：数据整体长度TOTAL\_LENGTH为1 \* 2048，使用GlobalTensor类的[SetGlobalBuffer](../../../../api/SIMD-API/basic_api/data_structures/GlobalTensor/SetGlobalBuffer.md)接口设定该核上Global Memory的起始地址以及长度。
+
+    ```
+    xGm.SetGlobalBuffer((__gm__ half *)x, TOTAL_LENGTH);
+    ```
+
+-   通过[Pipe内存管理对象](../../../../api/SIMD-API/basic_api/resource_management/TPipe/TPipe.md)为输入输出Queue分配内存。
+
+    比如，为输入x的Queue分配内存，可以通过如下代码段实现：
+
+    ```
+    pipe->InitBuffer(inQueueX, 1, TOTAL_LENGTH * sizeof(half))
+    ```
+
+具体的初始化函数代码如下：
+
+```
+constexpr int32_t TOTAL_LENGTH = 1 * 2048;  // 数据总长
+__aicore__ inline void Init(__gm__ uint8_t* x, __gm__ uint8_t* y, __gm__ uint8_t* z, AscendC::TPipe* pipeIn)
+{
+    pipe = pipeIn;    
+    // 设置Global Memory的起始地址以及长度
+    xGm.SetGlobalBuffer((__gm__ half*)x, TOTAL_LENGTH);
+    yGm.SetGlobalBuffer((__gm__ half*)y, TOTAL_LENGTH);
+    zGm.SetGlobalBuffer((__gm__ half*)z, TOTAL_LENGTH);
+
+    // 通过Pipe内存管理对象为输入输出Queue分配内存
+    pipe->InitBuffer(inQueueX, 1, TOTAL_LENGTH * sizeof(half));
+    pipe->InitBuffer(inQueueY, 1, TOTAL_LENGTH * sizeof(half));
+    pipe->InitBuffer(outQueueZ, 1, TOTAL_LENGTH * sizeof(half));
+}
+```
+
+基于矢量编程范式，将核函数（Kernel）的实现分为3个基本任务：CopyIn，Compute，CopyOut。再根据编程范式上面的算法分析，将整个计算拆分成三个Stage，用户单独编写每个Stage的代码，三阶段流程示意图参见[图3](#zh-cn_topic_0000002201157438_fig4134406304)，具体流程如下：
+
+1.  Stage1：CopyIn实现。
+<a id="copyin-implementation"></a> 
+
+    1.  使用[DataCopy](../../../../api/SIMD-API/basic_api/data_move_guide/overview/data_move_concept.md)接口将GlobalTensor数据拷贝到LocalTensor。
+    2.  使用[EnQue](../../../../api/SIMD-API/basic_api/resource_management/TQue/EnQue.md)将LocalTensor放入UB（VECIN）的Queue中。
+
+    ```
+    // 从Que中为LocalTensor分配内存
+    AscendC::LocalTensor<half> xLocal = inQueueX.AllocTensor<half>();
+    AscendC::LocalTensor<half> yLocal = inQueueY.AllocTensor<half>();
+    // 将GlobalTensor数据拷贝到LocalTensor
+    AscendC::DataCopy(xLocal, xGm, TOTAL_LENGTH);
+    AscendC::DataCopy(yLocal, yGm, TOTAL_LENGTH);
+    // LocalTensor放入VECIN的Queue中
+    inQueueX.EnQue(xLocal);
+    inQueueY.EnQue(yLocal);
+    ```
+
+2.  Stage2：Compute实现。
+
+    1.  使用[DeQue](../../../../api/SIMD-API/basic_api/resource_management/TQue/DeQue.md)从UB（VECIN）中取出LocalTensor。
+    2.  使用Ascend C接口[Add](../../../../api/SIMD-API/basic_api/memory_vector_compute/basic_arithmetic/Add.md)完成矢量计算。
+    3.  使用[EnQue](../../../../api/SIMD-API/basic_api/resource_management/TQue/EnQue.md)将计算结果LocalTensor放入到UB（VECOUT）的Queue中。
+    4.  使用[FreeTensor](../../../../api/SIMD-API/basic_api/resource_management/TQue/FreeTensor.md)释放不再使用的LocalTensor。
+
+    ```
+    // 将Input从VECIN的Queue中取出
+    AscendC::LocalTensor<half> xLocal = inQueueX.DeQue<half>();
+    AscendC::LocalTensor<half> yLocal = inQueueY.DeQue<half>();
+    AscendC::LocalTensor<half> zLocal = outQueueZ.AllocTensor<half>();
+    // 调用Add算子进行计算
+    AscendC::Add(zLocal, xLocal, yLocal, TOTAL_LENGTH);
+    // 将计算结果LocalTensor放入到VECOUT的Queue中
+    outQueueZ.EnQue<half>(zLocal);
+    // 释放LocalTensor
+    inQueueX.FreeTensor(xLocal);
+    inQueueY.FreeTensor(yLocal);
+    ```
+
+3.  Stage3：CopyOut实现。
+<a id="copyout-implementation"></a>
+
+    1.  使用[DeQue](../../../../api/SIMD-API/basic_api/resource_management/TQue/DeQue.md)接口从UB（VECOUT）的Queue中取出LocalTensor。
+    2.  使用[DataCopy](../../../../api/SIMD-API/basic_api/data_move_guide/overview/data_move_concept.md)接口将LocalTensor拷贝到GlobalTensor上。
+    3.  使用[FreeTensor](../../../../api/SIMD-API/basic_api/resource_management/TQue/FreeTensor.md)将不再使用的LocalTensor进行回收。
+
+    ```
+    // 将计算结果从VECOUT的Queue中取出
+    AscendC::LocalTensor<half> zLocal = outQueueZ.DeQue<half>();
+    // 将计算结果从LocalTensor数据拷贝到GlobalTensor
+    AscendC::DataCopy(zGm, zLocal, TOTAL_LENGTH);
+    // 释放LocalTensor
+    outQueueZ.FreeTensor(zLocal);
+    ```

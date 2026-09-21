@@ -1,0 +1,151 @@
+# 连续非对齐场景优化<a name="ZH-CN_TOPIC_0000002530088763"></a>
+
+## 连续非对齐搬运优化建议<a name="section14269121313385"></a>
+
+-   优先采用连续对齐搬运以避免额外开销，提升整体性能。
+-   由于硬件支持限制，连续非对齐搬运时不建议使用AddrReg存储偏移量，推荐使用uint32\_t类型存储偏移量，使用[post update](../../../../../api/SIMD-API/basic_api/reg_vector_compute/reg_data_load/LoadUnAlign_continuous.md)模式搬运，该场景下每次调用接口自动更新源操作数在Unified Buffer（UB）上的地址。后续的优化建议均基于此场景展开。
+-   连续非对齐搬入时，每次将UB数据搬运至RegTensor后，非对齐寄存器会缓存后续非对齐数据，下一次搬运时非对齐寄存器中的数据会写入RegTensor，因此连续非对齐搬入初始化仅需执行一次，应移至for循环外部。
+-   连续非对齐搬出时，每次将RegTensor数据搬运至UB后，非对齐寄存器会缓存后续非对齐数据，下一次搬运时非对齐寄存器中缓存的数据将写入UB，因此连续非对齐搬出后处理只需执行一次，应移至for循环外部。
+
+【正例】
+
+```
+// 非对齐搬入初始化，使用uint32_t管理偏移量，移至for循环外部。
+AscendC::Reg::LoadUnAlignPre(ureg0, srcAddr);
+for (uint16_t i = 0; i < repeatTimes; ++i) {
+     AscendC::Reg::LoadUnAlign(srcReg, ureg0, srcAddr + i * postUpdateStride);
+     AscendC::Reg::StoreUnAlign(dstAddr, srcReg, ureg1, postUpdateStride);
+}
+// 非对齐搬出后处理，移至for循环外部。
+AscendC::Reg::StoreUnAlignPost(dstAddr, ureg1, 0);
+```
+
+【反例】
+
+```
+for (uint16_t i = 0; i < repeatTimes; ++i) {
+     AscendC::Reg::LoadUnAlignPre(ureg0, srcAddr + i * postUpdateStride);
+     AscendC::Reg::LoadUnAlign(srcReg, ureg0, srcAddr + i * postUpdateStride);
+     AscendC::Reg::StoreUnAlign(dstAddr, srcReg, ureg1, postUpdateStride);
+     AscendC::Reg::StoreUnAlignPost(dstAddr, ureg1, 0);
+}
+```
+
+## 连续非对齐搬运接口介绍<a name="section242991114420"></a>
+
+为提升对不规则内存地址的处理能力，Reg矢量计算支持在数据搬运过程中对非32字节对齐的地址进行访问，适用于从UB向RegTensor非对齐搬运，或从RegTensor向UB非对齐搬运的场景。为降低非对齐访问带来的性能开销，RegBase引入非对齐寄存器缓存机制，该机制利用非对齐寄存器UnalignRegForLoad和UnalignRegForStore作为临时缓存区，用于暂存跨对齐边界的数据，从而实现高效的连续非对齐数据传输。
+
+在读非对齐地址前，应该先通过LoadUnAlignPre进行初始化，然后再使用LoadUnAlign。在写非对齐地址时，先使用StoreUnAlign，再使用StoreUnAlignPost进行后处理。使用uint32\_t管理偏移量的搬入搬出接口和maskReg搬出接口如下：
+
+-   连续非对齐搬入，使用uint32\_t存储搬运量
+
+    ```
+    __simd_callee__ inline void LoadUnAlignPre(UnalignRegForLoad& ureg, __ubuf__ T* srcAddr);
+    __simd_callee__ inline void LoadUnAlign(U& dstReg, UnalignRegForLoad& ureg, __ubuf__ T*& srcAddr, uint32_t postUpdateStride);
+    ```
+
+-   连续非对齐搬出，使用uint32\_t存储偏移量
+
+    ```
+    __simd_callee__ inline void StoreUnAlign(__ubuf__ T*& dstAddr, U& srcReg, UnalignRegForStore& ureg, uint32_t postUpdateStride);
+    __simd_callee__ inline void StoreUnAlignPost(__ubuf__ T*& dstAddr, UnalignRegForStore& ureg, int32_t postUpdateStride);
+    ```
+
+-   连续非对齐搬出，将maskReg搬出至UB
+
+    ```
+    __simd_callee__ inline void StoreUnAlign(__ubuf__ T*& dstAddr, MaskReg& mask, UnalignRegForStore& ureg);
+    __simd_callee__ inline void StoreUnAlignPost(__ubuf__ T*& dstAddr, UnalignRegForStore& ureg, int32_t postUpdateStride);
+    ```
+
+## 非对齐寄存器原理<a name="section1949183624916"></a>
+
+本节主要介绍在非对齐搬运过程中，非对齐寄存器如何发挥其作用，并详细解释内部原理，帮助开发者理解为什么上文的性能优化建议能够带来性能收益。首先介绍连续非对齐数据搬入、连续非对齐数据搬出以及MaskReg连续非对齐数据搬出的实现原理，然后通过一个具体的搬入搬出例子将这些关键流程串接起来。
+
+-   **非对齐数据搬入**
+
+    如下图所示，从UB地址srcAddr \~ 304读取数据，并将其搬运至目标寄存器dstReg（256B）。处理流程如下：
+
+    -   调用**LoadUnAlignPre**进行非对齐搬入初始化。非对齐寄存器ureg缓存UB地址32 \~ 64的有效数据，作为后续非对齐访问的前置数据缓存。
+    -   调用**LoadUnAlign**，硬件指令将UB地址64 \~ 320的数据搬入临时寄存器tmpReg，并将ureg中srcAddr \~ 64对应的数据与tmpReg中地址64 \~ 304对应的数据拼接在一起，将结果写入dstReg。本次搬运后，UB地址288 \~ 320的数据会被写入ureg。连续非对齐搬入时，由于LoadUnAlign会将后续未对齐的数据缓存至ureg，所以下一次搬入不需要再次调用LoadUnAlignPre，只需在第一次搬入前调用一次LoadUnAlignPre，从而实现非对齐搬入的性能优化。
+
+        **图1**  非对齐数据搬入<a name="fig638414472320"></a>  
+        
+        ![](../../../../figures/unaligned_in_77.png)
+
+-   **非对齐数据搬出**
+
+    将源寄存器srcReg中的非对齐数据写入UB地址dstAddr，根据ureg当前状态，分为两种场景：
+
+    **场景一：ureg为空**
+
+    -   调用**StoreUnAlign**，此时ureg内无有效数据，表示连续非对齐搬出的起始状态，将srcReg中对应UB地址48 \~ 288的数据写入dstAddr，同步将srcReg中对应UB地址288 \~ 320的数据缓存至ureg。
+    -   调用**StoreUnAlignPost**进行非对齐搬出后处理。将ureg中缓存的UB地址288 \~ 320对应的有效数据写入UB。
+
+    **图2**  非对齐数据搬出（ureg为空）<a name="fig34750199610"></a>  
+    
+    ![](../../../../figures/unaligned_out_0.png)
+
+    **场景二：ureg不为空**
+
+    -   调用**StoreUnAlign**，此时ureg内有有效数据，系统将ureg中UB地址32 \~ dstAddr对应的数据与srcReg中UB地址dstAddr \~ 288对应的数据进行拼接，结果写入UB地址dstAddr。同步将srcReg中对应UB地址288 \~ 320的数据缓存至ureg。连续非对齐搬出时，由于当ureg不为空时，下一次StoreUnAlign会读本次StoreUnAlign缓存至ureg中数据，所以本次搬出不需调用StoreUnAlignPost，只需在搬出后调用一次StoreUnAlignPost，从而实现非对齐搬出的性能优化。
+    -   调用**StoreUnAlignPost**进行非对齐搬出后处理。将ureg中缓存的UB地址288 \~ 320对应的有效数据写入UB。
+
+    **图3**  非对齐数据搬出（ureg不为空）<a name="fig579119300430"></a>  
+    
+    ![](../../../../figures/unaligned_out_1.png)
+
+-   **MaskReg连续非对齐数据搬出**
+
+    将源寄存器MaskReg（32B）搬出至UB。
+
+    -   UB地址上数据类型为b16时，硬件指令从每个2位数据中提取最低有效位（LSB），将MaskReg中32B数据打包成16B，写入UB。搬运完成后UB地址按16B偏移量更新。
+    -   UB地址上数据类型为b32时，硬件指令从每个4位数据中提取最低有效位（LSB），将MaskReg中32B数据打包成8B，写入UB。搬运完成后UB地址按8B偏移量更新。
+
+    以UB地址上数据类型为b16为例，将两个MaskReg数据写入dstAddr \~ 72，按以下步骤进行非对齐搬出：
+
+    -   将maskReg1压缩后的16B数据（UB地址dstAddr \~ 56）缓存至ureg。
+    -   将ureg中的数据与maskReg2压缩后的16B数据的部分数据（UB地址56 \~ 64）进行拼接，结果写入UB地址dstAddr \~ 64。
+    -   将maskReg2压缩后的16B数据的部分数据（UB地址64 \~ 72）缓存至ureg。
+    -   非对齐搬出后处理。将ureg中缓存的数据写入UB地址64 \~ 72。MaskReg连续非对齐搬出与RegTensor连续非对齐搬出类似，只需在搬出后调用一次StoreUnAlignPost，实现MaskReg连续非对齐搬出的性能优化。
+
+    **图4**  MaskReg连续非对齐数据搬出<a name="fig18974124104813"></a>  
+    
+    ![](../../../../figures/mask_reg_out.png)
+
+-   **连续非对齐搬入搬出示例**
+
+    如下图，将UB地址48 \~ 560的uint32\_t数据\[1, 2, 3, ... , 128\]搬入至dstReg，再搬回UB，需要两次搬入搬出操作，即for循环执行两次，初始化和后处理移至for循环外。
+
+    postUpdateStride = 256B / sizeof(T)  （即每次地址偏移256B），repeatTimes = dataSize / 256B（即迭代次数=总数据量/VL）。
+
+    PostUpdate扩展搬运接口POST_MODE_UPDATE模式示例片段如下：
+
+    ```cpp
+    template <typename T> 
+    __simd_vf__ inline void LoadUnAlignVF(__ubuf__ T* dstAddr, __ubuf__ T* srcAddr, uint32_t postUpdateStride, uint16_t repeatTimes) 
+    { 
+    AscendC::Reg::RegTensor<T> srcReg; 
+    AscendC::Reg::UnalignRegForLoad ureg0; 
+    AscendC::Reg::UnalignRegForStore ureg1; 
+    // 非对齐搬入初始化，只需在迭代开始前调用一次。 
+    AscendC::Reg::LoadUnAlignPre(ureg0, srcAddr); 
+    for (uint16_t i = 0; i < repeatTimes; ++i) { 
+        AscendC::Reg::LoadUnAlign(srcReg, ureg0, srcAddr, postUpdateStride); 
+        AscendC::Reg::StoreUnAlign(dstAddr, srcReg, ureg1, postUpdateStride); 
+    } 
+    // 非对齐搬出后处理，只需在迭代结束后调用一次。 
+    AscendC::Reg::StoreUnAlignPost(dstAddr, ureg1, 0); 
+    }
+    ```
+
+    1.  非对齐搬入初始化：更新ureg1 = \[1, 2, 3, 4\]；
+    2.  非对齐搬入：tmpReg =\[5, 6, 7, ... , 68\]，tmpReg部分数据和ureg1数据写入dstReg = \[1, 2, 3, ... , 64\]，更新ureg1 = \[61, 62, 63, ... , 68\];
+    3.  非对齐搬出：dstReg部分数据\[1, 2, 3, ... , 60\]写入UB地址48 \~ 288，更新ureg2 = \[61, 62, 63, 64\]；
+    4.  非对齐搬入：tmpReg = \[69, 70, 71, ... ,128\]，tmpReg数据和ureg1部分数据写入dstReg = \[65, 66 67, ... , 128\]；
+    5.  非对齐搬出：ureg2数据\[61, 62, 63, 64\]和dstReg部分数据\[65, 66, 67, ... ,124\]写入UB地址288 \~ 544，更新ureg2 = \[125, 126, 127, 128\]；
+    6.  非对齐搬出后处理：将ureg2中缓存的数据\[125, 126, 127, 128\]写入UB地址544 \~ 560。
+
+    **图5**  连续非对齐搬入搬出<a name="fig98921837195710"></a>  
+    
+    ![](../../../../figures/unaligned_io.png)
