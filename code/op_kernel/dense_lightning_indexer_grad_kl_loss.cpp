@@ -126,6 +126,7 @@ private:
         stageRaw_ = LocalTensor<T>(TPosition::VECCALC, layout_.stageOff, stageElems_);
         qiStage_ = LocalTensor<T>(TPosition::VECCALC, layout_.qiStageOff,
                                   QI_STAGE_ROWS * dimPad_);
+        dqStage_ = LocalTensor<T>(TPosition::VECCALC, layout_.qiStageOff, QI_STAGE_ROWS * dimPad_);
         qiF_ = LocalTensor<float>(TPosition::VECCALC, layout_.qiFOff, nidx_ * dimPad_);
         kiT_ = LocalTensor<CT>(TPosition::VECCALC, layout_.kiTOff, dimPad_);
         kiF_ = LocalTensor<float>(TPosition::VECCALC, layout_.kiFOff, dimPad_);
@@ -404,19 +405,18 @@ private:
                 WholeReduceSum<float>(tgt_[j], sc_[j * n1Pad_], MaskOf(n1_, 0), 1, 1, 1, 1);
                 continue;
             }
-            // n1 > 64：各 64 头分片分别归约后按标量相加（分片结果间隔 8 个槽位）
+            // n1 > 64：各 64 头分片分别归约（结果间隔 8 个槽位），再用向量相加、
+            // 只做一次标量回读，避免每个分片一次 V->S 同步。
             for (uint32_t p = 0; p < nPieces; ++p) {
                 WholeReduceSum<float>(part_[p * 8], sc_[j * n1Pad_ + p * 64u], MaskOf(n1_, p), 1,
                                       1, 1, 1);
             }
             PipeBarrier<PIPE_V>();
-            SetFlag<HardEvent::V_S>(EV_V_S);
-            WaitFlag<HardEvent::V_S>(EV_V_S);
-            float pieceSum = 0.0f;
-            for (uint32_t p = 0; p < nPieces; ++p) {
-                pieceSum += part_.GetValue(p * 8);
+            for (uint32_t p = 1; p < nPieces; ++p) {
+                Add(part_, part_, part_[p * 8], 8);
             }
-            tgt_.SetValue(j, pieceSum);
+            PipeBarrier<PIPE_V>();
+            tgt_.SetValue(j, ReadScalar(part_));
             SetFlag<HardEvent::S_V>(EV_S_V);
             WaitFlag<HardEvent::S_V>(EV_S_V);
         }
@@ -581,14 +581,18 @@ private:
                           static_cast<uint8_t>(nidx_), dqParams);
             }
             PipeBarrier<PIPE_V>();
-            // dk[j] += sum_i qi[i] * m_ij（逐头显式累加，逐个 head 使用 block i 的 m 广播）
+            // dk[j] += sum_i qi[i] * m_ij
+            // 用 dstRepStride=0 让一条指令跨 repeat 累加：repeat 对应 index head，
+            // src0 按 qiF_ 行距前进，src1 走 mblk_ 的每头 1 个 block。
             Duplicate(dkRow_, 0.0f, dimPad_);
             PipeBarrier<PIPE_V>();
-            for (uint32_t i = 0; i < nidx_; ++i) {
+            {
+                const uint8_t qRepStride = static_cast<uint8_t>(dimPad_ / FP32_PER_BLOCK);
+                const uint8_t mRepStride = 1;
                 for (uint32_t p = 0; p < dimPieces; ++p) {
-                    BinaryRepeatParams dkParams{1, 1, 0, 0, 0, 1};
-                    MulAddDst(dkRow_[p * 64u], qiF_[i * dimPad_ + p * 64u], mblk_[i * 8u],
-                              MaskOf(dim_, p), static_cast<uint8_t>(1), dkParams);
+                    BinaryRepeatParams dkParams{1, 1, 0, 0, qRepStride, mRepStride};
+                    MulAddDst(dkRow_[p * 64u], qiF_[p * 64u], mblk_, MaskOf(dim_, p),
+                              static_cast<uint8_t>(nidx_), dkParams);
                 }
             }
             PipeBarrier<PIPE_V>();
@@ -615,15 +619,22 @@ private:
         const uint64_t dqBase = (static_cast<uint64_t>(b) * s1_ + row) * nidx_ * dim_;
         const uint64_t dwBase = (static_cast<uint64_t>(b) * s1_ + row) * nidx_;
         SyncVecToMte3();
-        for (uint32_t i = 0; i < nidx_; ++i) {
-            const uint64_t offset = dqBase + static_cast<uint64_t>(i) * dim_;
-            DataCopyExtParams params{1, static_cast<uint32_t>(dim_ * sizeof(T)), 0, 0, 0};
-            if constexpr (sizeof(CT) == 4u) {
-                DataCopyPad(dQueryIndexGm_[offset], dq_[i * dimPad_], params);
-            } else {
-                Cast(outT_, dq_[i * dimPad_], RoundMode::CAST_NONE, dimPad_);
+        if constexpr (sizeof(CT) == 4u) {
+            DataCopyExtParams params{static_cast<uint16_t>(nidx_),
+                                     static_cast<uint32_t>(dim_ * sizeof(T)),
+                                     static_cast<uint32_t>((dimPad_ - dim_) * 4u), 0, 0};
+            DataCopyPad(dQueryIndexGm_[dqBase], dq_, params);
+        } else {
+            // 低精度输出：按 STAGE 行分块 Cast，显著减少每 key 一次的 V/MTE3 同步
+            for (uint32_t i0 = 0; i0 < nidx_; i0 += QI_STAGE_ROWS) {
+                const uint32_t rows = MinU32(QI_STAGE_ROWS, nidx_ - i0);
+                Cast(dqStage_, dq_[i0 * dimPad_], RoundMode::CAST_NONE, rows * dimPad_);
                 SyncVecToMte3();
-                DataCopyPad(dQueryIndexGm_[offset], outT_, params);
+                DataCopyExtParams params{static_cast<uint16_t>(rows),
+                                         static_cast<uint32_t>(dim_ * sizeof(T)),
+                                         static_cast<uint32_t>((dimPad_ - dim_) * sizeof(T)), 0, 0};
+                DataCopyPad(dQueryIndexGm_[dqBase + static_cast<uint64_t>(i0) * dim_],
+                            dqStage_, params);
                 SyncMte3Done();
             }
         }
@@ -794,7 +805,7 @@ private:
     DliglUbLayout layout_;
 
     LocalTensor<CT> qT_, kT_, prodT_, kiT_;
-    LocalTensor<T> qiStage_;
+    LocalTensor<T> qiStage_, dqStage_;
     LocalTensor<T> stageRaw_, outT_;
     LocalTensor<float> prod_, qiF_, kiF_, sc_, u_, tgt_, sh_, pred_, del_, dkAcc_, dkRow_, dq_;
     LocalTensor<float> maxVec_, dblk_, mblk_, part_, w_, wb_, dw_, dwRow_, scratch_;

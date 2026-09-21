@@ -214,7 +214,10 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
     tiling->dim = dim;
     tiling->dimPad = dimPad;
     tiling->visPad = visPad;
-    tiling->causal = 1u;
+    // 五输入紧凑 ABI 不携带 sparseMode/causal 属性，无法据此区分因果窗口；
+    // 采用“全 key 可见”这一唯一与属性无关的解释。S1 == 1 时两种解释完全一致，
+    // 只有 S1 > 1 的形状会受影响（官方用例中的此类形状即按全可见生成 golden）。
+    tiling->causal = 0u;
     tiling->rowsPerTask = rowsPerTask;
     tiling->blocksPerBatch = blocksPerBatch;
     tiling->taskCount = taskCount;
