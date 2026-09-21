@@ -27,6 +27,7 @@ struct DenseLightningIndexerGradKlLossTilingData {
     uint32_t lossOffset;      // workspace 中 loss 累加槽偏移（单个 32B 对齐槽）
     uint32_t wsSysBytes;      // workspace 起始处系统保留字节数（用户数据偏移）
     uint32_t kiCacheRows;     // keyIndex 行缓存行数（0 表示不做缓存，逐 key 载入）
+    uint32_t kChunkRows;      // 一次连续载入 UB 的 key 行数（>=1，整块 DMA 取代逐 key DMA）
     uint32_t weightsFp32;     // 1: weights 为 float32
     uint32_t stageElems;      // bf16 输入时的 T 暂存元素数（0 表示不需要）
     uint32_t blockDimUsed;    // 启动核数
@@ -38,7 +39,7 @@ struct DliglUbLayout {
     uint32_t outTOff;    // dimPad 个 T（写回时的转换暂存）
     uint32_t stageOff;   // bf16 输入时的原始暂存（T）
     uint32_t qTOff;      // (n1, dimPad) CT 整行 query
-    uint32_t kTOff;      // (n1, dimPad) T  该 key 的整行 key
+    uint32_t kTOff;      // (kChunkRows * n1, dimPad) CT 连续 key 行块
     uint32_t prodTOff;   // (headBlock, dimPad) T  乘积（低精度）
     uint32_t prodOff;    // (headBlock, dimPad) fp32 乘积（相似度按 headBlock 行分块复用）
     uint32_t qiStageOff; // (QI_STAGE, dimPad) T 分块暂存
@@ -83,7 +84,8 @@ DLIGL_UB_FN DliglUbLayout DliglComputeUbLayout(uint32_t headBlock, uint32_t n1, 
                                                uint32_t dimPad, uint32_t visPad, uint32_t n1Pad,
                                                uint32_t nidxPad, uint32_t dkRows, uint32_t inputBytes,
                                                uint32_t weightBytes, uint32_t stageElems,
-                                               uint32_t kiCacheRows = 0u) {
+                                               uint32_t kiCacheRows = 0u,
+                                               uint32_t kChunkRows = 1u) {
     DliglUbLayout l;
     uint32_t off = 0;
     uint32_t partElems = ((dimPad + 63u) / 64u) * ((n1 > nidx ? n1 : nidx) + 7u & ~7u);
@@ -104,7 +106,7 @@ DLIGL_UB_FN DliglUbLayout DliglComputeUbLayout(uint32_t headBlock, uint32_t n1, 
     l.qTOff = off;
     off += ((n1 * dimPad * (inputBytes == 4u ? 4u : 2u) + 31u) & ~31u);
     l.kTOff = off;
-    off += ((n1 * dimPad * (inputBytes == 4u ? 4u : 2u) + 31u) & ~31u);
+    off += ((kChunkRows * n1 * dimPad * (inputBytes == 4u ? 4u : 2u) + 31u) & ~31u);
     l.prodTOff = off;
     if (inputBytes != 4u) {
         off += ((headBlock * dimPad * 2u + 31u) & ~31u);

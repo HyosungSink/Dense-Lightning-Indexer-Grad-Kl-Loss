@@ -70,6 +70,7 @@ public:
         scale_ = td.scale;
         stageElems_ = td.stageElems;
         kiCacheRows_ = td.kiCacheRows;
+        kChunkRows_ = td.kChunkRows > 0u ? td.kChunkRows : 1u;
         inputBytes_ = static_cast<uint32_t>(sizeof(T));
         weightBytes_ = static_cast<uint32_t>(sizeof(TW));
 
@@ -94,7 +95,7 @@ public:
 
         layout_ = DliglComputeUbLayout(headBlock_, n1_, nidx_, dimPad_, visPad_, n1Pad_, nidxPad_,
                                        dkRows_, inputBytes_, weightBytes_, stageElems_,
-                                       kiCacheRows_);
+                                       kiCacheRows_, kChunkRows_);
         BuildTensors();
     }
 
@@ -105,7 +106,6 @@ public:
         Duplicate(scratch_[128], 1.0f, 64);
         Duplicate(lz_, 1.0f, 64);
         Duplicate(scratch_[384], 0.0f, 8);
-        PipeBarrier<PIPE_V>();
         for (uint32_t task = coreIdx; task < taskCount_; task += coreNum_) {
             ProcessTask(task);
         }
@@ -121,7 +121,8 @@ public:
 private:
     __aicore__ inline void BuildTensors() {
         qT_ = LocalTensor<CT>(TPosition::VECCALC, layout_.qTOff, n1_ * dimPad_);
-        kT_ = LocalTensor<CT>(TPosition::VECCALC, layout_.kTOff, n1_ * dimPad_);
+        kT_ = LocalTensor<CT>(TPosition::VECCALC, layout_.kTOff,
+                              kChunkRows_ * n1_ * dimPad_);
         prodT_ = LocalTensor<CT>(TPosition::VECCALC, layout_.prodTOff, headBlock_ * dimPad_);
         prod_ = LocalTensor<float>(TPosition::VECCALC, layout_.prodOff, headBlock_ * dimPad_);
         outT_ = LocalTensor<T>(TPosition::VECCALC, layout_.outTOff, dimPad_);
@@ -162,6 +163,13 @@ private:
     __aicore__ inline uint32_t MinU32(uint32_t a, uint32_t b) const { return a < b ? a : b; }
     __aicore__ inline uint32_t Align8(uint32_t value) const { return (value + 7u) & ~7u; }
     __aicore__ inline uint32_t PiecesOf(uint32_t width) const { return (width + 63u) / 64u; }
+    // 与 UB 布局中 part_ 容量保持一致（见 DliglComputeUbLayout）
+    __aicore__ inline uint32_t PartElems() const {
+        uint32_t value = ((dimPad_ + 63u) / 64u) * Align8(n1_ > nidx_ ? n1_ : nidx_);
+        if (value < 64u) return 64u;
+        if (value > 2048u) return 2048u;
+        return value;
+    }
     __aicore__ inline uint32_t MaskOf(uint32_t width, uint32_t piece) const {
         const uint32_t left = width - piece * 64u;
         return left > 64u ? 64u : left;
@@ -198,7 +206,6 @@ private:
             WholeReduceSum<float>(part_[p * 8], src[p * 64u], MaskOf(count, p), 1, 1, 1, 8);
         }
         if (pieces > 1u) {
-            PipeBarrier<PIPE_V>();
             WholeReduceSum<float>(part_, part_, pieces, 1, 1, 1, 1);
         }
         return ReadScalar(part_);
@@ -211,7 +218,6 @@ private:
         for (uint32_t p = 1; p < pieces; ++p) {
             WholeReduceMax<float>(part_[p * 8], src[p * 64u], MaskOf(count, p), 1, 1, 1, 8,
                                   ReduceOrder::ORDER_ONLY_VALUE);
-            PipeBarrier<PIPE_V>();
             Max(part_, part_, part_[p * 8], 8);
         }
         return ReadScalar(part_);
@@ -226,11 +232,39 @@ private:
     }
 
     // ------------------------------------------------------------- 载入
+    // dimPad == dim 时源/目的都连续且长度按 32B 对齐，可用单条 DataCopy 代替按行
+    // DataCopyPad：后者每行一个 256B 小 burst，MTE2 实测被 burst 数量而非带宽限制。
+    __aicore__ inline bool BulkOk(uint64_t base, uint64_t elems) const {
+        return dimPad_ == dim_ && elems != 0ull && (elems * sizeof(CT)) % 32u == 0u &&
+               (base * sizeof(T)) % 32u == 0u;
+    }
+
+    // 只发起 GM->UB 搬运、不等待：同一行内多次搬运共享一次 MTE2 等待，
+    // 把“逐块 DMA 往返”变成一次往返（实测 loads 阶段是本算子最大可控开销）。
+    __aicore__ inline void IssueRows(const GlobalTensor<T> &src, uint64_t base, uint64_t elems,
+                                     LocalTensor<CT> dst) {
+        if (BulkOk(base, elems)) {
+            DataCopy(dst, src[base], static_cast<uint32_t>(elems));
+            return;
+        }
+        const uint32_t rows = static_cast<uint32_t>(elems / dim_);
+        DataCopyExtParams params{static_cast<uint16_t>(rows),
+                                 static_cast<uint32_t>(dim_ * inputBytes_),
+                                 static_cast<uint32_t>((dimPad_ - dim_) * inputBytes_), 0, 0};
+        DataCopyPad(dst, src[base], params, DataCopyPadExtParams<CT>{false, 0, 0, 0});
+    }
+
     __aicore__ inline void LoadRows(const GlobalTensor<T> &src, uint64_t base, uint32_t rows,
                                     LocalTensor<CT> dst) {
         // 覆盖目的缓冲前，先等上一轮矢量读和 MTE3 读结束
         SyncVecDone();
         SyncMte3Done();
+        const uint64_t bulkElems = static_cast<uint64_t>(rows) * dim_;
+        if (BulkOk(base, bulkElems)) {
+            DataCopy(dst, src[base], static_cast<uint32_t>(bulkElems));
+            SyncMte2ToVec();
+            return;
+        }
         DataCopyExtParams params{static_cast<uint16_t>(rows),
                                  static_cast<uint32_t>(dim_ * inputBytes_),
                                  static_cast<uint32_t>((dimPad_ - dim_) * inputBytes_), 0, 0};
@@ -255,6 +289,30 @@ private:
         LoadRows(keyGm_, base, n1_, kT_);
     }
 
+    // 一次连续载入 rows 个 key 的整块 key（GM 上相邻 key 的 (n1, dim) 连续）
+    __aicore__ inline void LoadKChunk(uint32_t b, uint32_t j0, uint32_t rows) {
+        const uint64_t base = (static_cast<uint64_t>(b) * s2_ + j0) * n1_ * dim_;
+        const uint64_t elems = static_cast<uint64_t>(rows) * n1_ * dim_;
+        SyncVecDone();
+        SyncMte3Done();
+        if (BulkOk(base, elems)) {
+            DataCopy(kT_, keyGm_[base], static_cast<uint32_t>(elems));
+            SyncMte2ToVec();
+            return;
+        }
+        DataCopyExtParams params{static_cast<uint16_t>(rows * n1_),
+                                 static_cast<uint32_t>(dim_ * inputBytes_),
+                                 static_cast<uint32_t>((dimPad_ - dim_) * inputBytes_), 0, 0};
+        if constexpr (sizeof(T) == 2u && !std::is_same<T, half>::value) {
+            DataCopyPad(stageRaw_, keyGm_[base], params, DataCopyPadExtParams<T>{false, 0, 0, 0});
+            SyncMte2ToVec();
+            Cast(kT_, stageRaw_, RoundMode::CAST_NONE, rows * n1_ * dimPad_);
+        } else {
+            DataCopyPad(kT_, keyGm_[base], params, DataCopyPadExtParams<CT>{false, 0, 0, 0});
+            SyncMte2ToVec();
+        }
+    }
+
     __aicore__ inline void LoadQiAll(uint32_t b, uint32_t row) {
         const uint64_t base = (static_cast<uint64_t>(b) * s1_ + row) * nidx_ * dim_;
         if constexpr (sizeof(T) == 4u) {
@@ -263,15 +321,20 @@ private:
             // 分块载入并转 fp32，避免常驻一块 (nidx, dimPad) 的低精度缓冲
             for (uint32_t i0 = 0; i0 < nidx_; i0 += QI_STAGE_ROWS) {
                 const uint32_t rows = MinU32(QI_STAGE_ROWS, nidx_ - i0);
+                const uint64_t chunkBase = base + static_cast<uint64_t>(i0) * dim_;
                 SyncVecDone();
                 SyncMte3Done();
-                DataCopyExtParams params{static_cast<uint16_t>(rows),
-                                         static_cast<uint32_t>(dim_ * inputBytes_), 0, 0, 0};
-                DataCopyPad(qiStage_, queryIndexGm_[base + static_cast<uint64_t>(i0) * dim_], params,
-                            DataCopyPadExtParams<T>{false, 0, 0, 0});
+                if (BulkOk(chunkBase, static_cast<uint64_t>(rows) * dim_)) {
+                    DataCopy(qiStage_, queryIndexGm_[chunkBase],
+                             static_cast<uint32_t>(rows) * dim_);
+                } else {
+                    DataCopyExtParams params{static_cast<uint16_t>(rows),
+                                             static_cast<uint32_t>(dim_ * inputBytes_), 0, 0, 0};
+                    DataCopyPad(qiStage_, queryIndexGm_[chunkBase], params,
+                                DataCopyPadExtParams<T>{false, 0, 0, 0});
+                }
                 SyncMte2ToVec();
                 Cast(qiF_[i0 * dimPad_], qiStage_, RoundMode::CAST_NONE, rows * dimPad_);
-                PipeBarrier<PIPE_V>();
             }
         }
     }
@@ -282,25 +345,26 @@ private:
     }
 
     // 一次载入该 batch 全部 key 的 keyIndex（仅当缓存能装下 s2 行时）
-    __aicore__ inline void LoadKiAll(uint32_t b) {
+    __aicore__ inline void IssueKiAll(uint32_t b) {
         if (kiCacheRows_ < s2_) {
             return;
         }
-        SyncVecDone();
-        SyncMte3Done();
-        DataCopyExtParams params{static_cast<uint16_t>(s2_), static_cast<uint32_t>(dim_ * inputBytes_),
-                                 static_cast<uint32_t>((dimPad_ - dim_) * inputBytes_), 0, 0};
+        const uint64_t base = static_cast<uint64_t>(b) * s2_ * dim_;
+        const uint64_t elems = static_cast<uint64_t>(s2_) * dim_;
         if constexpr (sizeof(T) == 4u) {
-            DataCopyPad(kiCache_, keyIndexGm_[static_cast<uint64_t>(b) * s2_ * dim_], params,
-                        DataCopyPadExtParams<T>{false, 0, 0, 0});
-            SyncMte2ToVec();
+            IssueRows(keyIndexGm_, base, elems, kiCache_);
         } else {
-            DataCopyPad(kiCacheT_, keyIndexGm_[static_cast<uint64_t>(b) * s2_ * dim_], params,
-                        DataCopyPadExtParams<T>{false, 0, 0, 0});
-            SyncMte2ToVec();
+            IssueRows(keyIndexGm_, base, elems, kiCacheT_);
+        }
+    }
+
+    __aicore__ inline void FinishKiAll() {
+        if (kiCacheRows_ < s2_) {
+            return;
+        }
+        if constexpr (sizeof(T) != 4u) {
             Cast(kiCache_, kiCacheT_, RoundMode::CAST_NONE, s2_ * dimPad_);
         }
-        PipeBarrier<PIPE_V>();
     }
 
     // 取第 j 个 key 的 ki（fp32）：优先走缓存，否则逐 key 载入
@@ -318,19 +382,19 @@ private:
         return kiF_;
     }
 
-    __aicore__ inline void LoadWeights(uint32_t b, uint32_t row) {
+    __aicore__ inline void IssueWeights(uint32_t b, uint32_t row) {
         const uint64_t base = (static_cast<uint64_t>(b) * s1_ + row) * nidx_;
         DataCopyExtParams params{1, static_cast<uint32_t>(nidx_ * weightBytes_), 0, 0, 0};
         DataCopyPad(wRaw_, weightsGm_[base], params, DataCopyPadExtParams<TW>{false, 0, 0, 0});
-        SyncMte2ToVec();
+    }
+
+    __aicore__ inline void FinishWeights() {
         if constexpr (sizeof(TW) != 4u) {
             Cast(w_, wRaw_, RoundMode::CAST_NONE, nidx_);
         } else {
             Adds(w_, wRaw_, 0.0f, nidx_);
         }
-        PipeBarrier<PIPE_V>();
         Brcb(wb_, w_, static_cast<uint8_t>((nidx_ + 7u) / 8u), {1, 8});
-        PipeBarrier<PIPE_V>();
     }
 
     // 逐行 fp32 归约：dst[r] = sum_{d<width} src[r*pitch + d]，rows 行
@@ -346,12 +410,10 @@ private:
                                   static_cast<int32_t>(rows), 1, 1, static_cast<int32_t>(stride));
         }
         if (pieces > 1u) {
-            PipeBarrier<PIPE_V>();
             for (uint32_t p = 1; p < pieces; ++p) {
                 Add(part_, part_, part_[p * rows], rows);
             }
         }
-        PipeBarrier<PIPE_V>();
         Adds(dst, part_, 0.0f, static_cast<int32_t>(rows));
     }
 
@@ -368,8 +430,10 @@ private:
     }
 
     // ------------------------------------------------------------- 主注意力分数
-    __aicore__ inline void ComputeScoreBlock(uint32_t j, uint32_t h0, uint32_t hc) {
+    __aicore__ inline void ComputeScoreBlock(uint32_t j, uint32_t kLocal, uint32_t h0,
+                                              uint32_t hc) {
         constexpr uint32_t LANES = 256u / sizeof(CT);
+        const uint32_t kBase = kLocal * n1_ * dimPad_;
         constexpr uint8_t TSTRIDE_DIV = TBlocks();
         const uint32_t pieces = (dim_ + LANES - 1u) / LANES;
         const uint32_t redWidth = (pieces > 1u) ? (dim_ < LANES ? dim_ : LANES) : dim_;
@@ -380,11 +444,11 @@ private:
             const uint32_t mask = left > LANES ? LANES : left;
             if constexpr (sizeof(CT) == 4u) {
                 BinaryRepeatParams params{1, 1, 1, fStride, fStride, fStride};
-                Mul(prod_[p * LANES], kT_[h0 * dimPad_ + p * LANES], qT_[h0 * dimPad_ + p * LANES],
-                    mask, static_cast<uint8_t>(hc), params);
+                Mul(prod_[p * LANES], kT_[kBase + h0 * dimPad_ + p * LANES],
+                    qT_[h0 * dimPad_ + p * LANES], mask, static_cast<uint8_t>(hc), params);
             } else {
                 BinaryRepeatParams params{1, 1, 1, tStride, tStride, tStride};
-                Mul(prodT_[p * LANES], kT_[h0 * dimPad_ + p * LANES],
+                Mul(prodT_[p * LANES], kT_[kBase + h0 * dimPad_ + p * LANES],
                     qT_[h0 * dimPad_ + p * LANES], mask, static_cast<uint8_t>(hc), params);
             }
         }
@@ -404,46 +468,70 @@ private:
                         addParams);
                 }
             }
-            PipeBarrier<PIPE_V>();
             Cast(prod_, prodT_, RoundMode::CAST_NONE, hc * dimPad_);
-            PipeBarrier<PIPE_V>();
             ReduceRowsFp32(sc_[j * n1Pad_ + h0], prod_, hc, redWidth, dimPad_);
         }
     }
 
     __aicore__ inline void ComputeScores(uint32_t b, uint32_t vis) {
-        for (uint32_t j = 0; j < vis; ++j) {
-            LoadKRow(b, j);
-            for (uint32_t h0 = 0; h0 < n1_; h0 += headBlock_) {
-                const uint32_t hc = MinU32(headBlock_, n1_ - h0);
-                ComputeScoreBlock(j, h0, hc);
-                PipeBarrier<PIPE_V>();
+        for (uint32_t c = 0; c < vis; c += kChunkRows_) {
+            const uint32_t rows = MinU32(kChunkRows_, vis - c);
+            if (c != 0u) {
+                LoadKChunk(b, c, rows);
+            }
+            for (uint32_t j = c; j < c + rows; ++j) {
+                for (uint32_t h0 = 0; h0 < n1_; h0 += headBlock_) {
+                    const uint32_t hc = MinU32(headBlock_, n1_ - h0);
+                    ComputeScoreBlock(j, j - c, h0, hc);
+                }
             }
         }
         Muls(sc_, sc_, scale_, visPad_ * n1Pad_);
-        PipeBarrier<PIPE_V>();
     }
 
     // 每头最大值（跨 key）-> target_j = sum_h exp(s_hj - m_h)，最后统一 L1 归一化
     __aicore__ inline void ComputeTarget(uint32_t vis) {
         Duplicate(tgt_, 0.0f, visPad_);   // padding 保持 0，便于按 visPad 做运算
         Duplicate(maxVec_, -3.0e38f, n1Pad_);
-        PipeBarrier<PIPE_V>();
         const uint32_t nPieces = PiecesOf(n1_);
+        const uint8_t nStride = static_cast<uint8_t>(n1Pad_ / FP32_PER_BLOCK);
+        // 整块路径：repeat=vis 一次覆盖所有 key，省掉逐 key 指令与逐 key 标量回读。
+        // 需要 part_ 能容纳 nPieces*vis 个中间结果，否则退回逐 key 路径。
+        if (nPieces * visPad_ <= PartElems()) {
+            for (uint32_t p = 0; p < nPieces; ++p) {
+                BinaryRepeatParams mxParams{1, 1, 1, 0, nStride, 0};
+                Max(maxVec_[p * 64u], sc_[p * 64u], maxVec_[p * 64u], MaskOf(n1_, p),
+                    static_cast<uint8_t>(vis), mxParams);
+            }
+            for (uint32_t p = 0; p < nPieces; ++p) {
+                BinaryRepeatParams subParams{1, 1, 1, nStride, nStride, 0};
+                Sub(sc_[p * 64u], sc_[p * 64u], maxVec_[p * 64u], MaskOf(n1_, p),
+                    static_cast<uint8_t>(vis), subParams);
+                UnaryRepeatParams expParams{1, 1, nStride, nStride};
+                Exp(sc_[p * 64u], sc_[p * 64u], MaskOf(n1_, p), static_cast<uint8_t>(vis),
+                    expParams);
+                WholeReduceSum<float>(part_[p * vis], sc_[p * 64u], MaskOf(n1_, p),
+                                      static_cast<int32_t>(vis), 1, 1, nStride);
+            }
+            for (uint32_t p = 1; p < nPieces; ++p) {
+                Add(part_, part_, part_[p * vis], vis);
+            }
+            Adds(tgt_, part_, 0.0f, vis);
+            const float total = VecSum(tgt_, vis);
+            Muls(tgt_, tgt_, 1.0f / total, vis);
+            return;
+        }
         for (uint32_t j = 0; j < vis; ++j) {
             for (uint32_t p = 0; p < nPieces; ++p) {
                 Max(maxVec_[p * 64u], maxVec_[p * 64u], sc_[j * n1Pad_ + p * 64u], MaskOf(n1_, p));
             }
         }
-        PipeBarrier<PIPE_V>();
         for (uint32_t j = 0; j < vis; ++j) {
             for (uint32_t p = 0; p < nPieces; ++p) {
                 Sub(sc_[j * n1Pad_ + p * 64u], sc_[j * n1Pad_ + p * 64u], maxVec_[p * 64u],
                     MaskOf(n1_, p));
             }
-            PipeBarrier<PIPE_V>();
             Exp(sc_[j * n1Pad_], sc_[j * n1Pad_], n1_);
-            PipeBarrier<PIPE_V>();
             if (nPieces == 1u) {
                 WholeReduceSum<float>(tgt_[j], sc_[j * n1Pad_], MaskOf(n1_, 0), 1, 1, 1, 1);
                 continue;
@@ -454,19 +542,15 @@ private:
                 WholeReduceSum<float>(part_[p * 8], sc_[j * n1Pad_ + p * 64u], MaskOf(n1_, p), 1,
                                       1, 1, 1);
             }
-            PipeBarrier<PIPE_V>();
             for (uint32_t p = 1; p < nPieces; ++p) {
                 Add(part_, part_, part_[p * 8], 8);
             }
-            PipeBarrier<PIPE_V>();
             tgt_.SetValue(j, ReadScalar(part_));
             SetFlag<HardEvent::S_V>(EV_S_V);
             WaitFlag<HardEvent::S_V>(EV_S_V);
         }
-        PipeBarrier<PIPE_V>();
         const float total = VecSum(tgt_, vis);
         Muls(tgt_, tgt_, 1.0f / total, vis);
-        PipeBarrier<PIPE_V>();
     }
 
     // ------------------------------------------------------------- indexer 相似度
@@ -480,7 +564,6 @@ private:
         const uint32_t chunk = headBlock_ == 0u ? 1u : headBlock_;
         for (uint32_t j = 0; j < vis; ++j) {
             const LocalTensor<float> ki = KiRow(b, j);
-            PipeBarrier<PIPE_V>();
             for (uint32_t i0 = 0; i0 < nidx_; i0 += chunk) {
                 const uint32_t hc = MinU32(chunk, nidx_ - i0);
                 for (uint32_t p = 0; p < pieces; ++p) {
@@ -497,13 +580,10 @@ private:
                             static_cast<uint8_t>(hc), addParams);
                     }
                 }
-                PipeBarrier<PIPE_V>();
                 ReduceRowsFp32(u_[j * nidxPad_ + i0], prod_, hc, redWidth, dimPad_);
-                PipeBarrier<PIPE_V>();
             }
             Maxs(u_[j * nidxPad_], u_[j * nidxPad_], 0.0f, nidx_);  // ReLU
         }
-        PipeBarrier<PIPE_V>();
     }
 
     // logits_j = sum_i w_i * relu(u_ij)
@@ -511,12 +591,10 @@ private:
         const uint32_t pieces = PiecesOf(nidx_);
         // padding 位置置为 -1e30：后续按 visPad 宽度做 softmax 时贡献恒为 0
         Duplicate(sh_, -1.0e30f, visPad_);
-        PipeBarrier<PIPE_V>();
         for (uint32_t j = 0; j < vis; ++j) {
             for (uint32_t p = 0; p < pieces; ++p) {
                 Mul(dwRow_[p * 64u], u_[j * nidxPad_ + p * 64u], w_[p * 64u], MaskOf(nidx_, p));
             }
-            PipeBarrier<PIPE_V>();
             if (pieces == 1u) {
                 WholeReduceSum<float>(sh_[j], dwRow_, MaskOf(nidx_, 0), 1, 1, 1, 1);
             } else {
@@ -524,14 +602,11 @@ private:
                 for (uint32_t p = 1; p < pieces; ++p) {
                     WholeReduceSum<float>(part_[p * 8], dwRow_[p * 64u], MaskOf(nidx_, p), 1, 1, 1,
                                           1);
-                    PipeBarrier<PIPE_V>();
                     Add(part_, part_, part_[p * 8], 8);
                 }
-                PipeBarrier<PIPE_V>();
                 Adds(sh_[j], part_, 0.0f, 1);
             }
         }
-        PipeBarrier<PIPE_V>();
     }
 
     __aicore__ inline void SoftmaxAndLoss(uint32_t vis) {
@@ -539,36 +614,23 @@ private:
         const uint32_t width = visPad_;
         const float logitMax = VecMax(sh_, width);
         Adds(sh_, sh_, -logitMax, width);
-        PipeBarrier<PIPE_V>();
         Exp(pred_, sh_, width);
-        PipeBarrier<PIPE_V>();
         const float normalizer = VecSum(pred_, width);
         Muls(pred_, pred_, 1.0f / normalizer, width);
-        PipeBarrier<PIPE_V>();
         Sub(del_, pred_, tgt_, width);
-        PipeBarrier<PIPE_V>();
         // loss 项：sum p*(ln p - shifted) + ln Z（tgt padding 为 0）
         Maxs(scratch_, tgt_, 1.0e-30f, width);
-        PipeBarrier<PIPE_V>();
         Ln(scratch_, scratch_, width);
-        PipeBarrier<PIPE_V>();
         Mul(scratch_, scratch_, tgt_, width);
-        PipeBarrier<PIPE_V>();
         Mul(scratch_[64], tgt_, sh_, width);
-        PipeBarrier<PIPE_V>();
         Sub(scratch_, scratch_, scratch_[64], width);
-        PipeBarrier<PIPE_V>();
         // 逐 key 项按向量累积，lnZ 只写第 0 个元素：整个任务只在末尾做一次归约
         Add(lossAcc_, lossAcc_, scratch_, width);
-        PipeBarrier<PIPE_V>();
         lz_.SetValue(0, normalizer);
         SetFlag<HardEvent::S_V>(EV_S_V);
         WaitFlag<HardEvent::S_V>(EV_S_V);
-        PipeBarrier<PIPE_V>();
         Ln(lz_, lz_, 8);
-        PipeBarrier<PIPE_V>();
         Add(lossAcc_, lossAcc_, lz_, 8);
-        PipeBarrier<PIPE_V>();
         (void)vis;
     }
 
@@ -576,47 +638,36 @@ private:
     __aicore__ inline void ComputeGradients(uint32_t b, uint32_t vis) {
         Duplicate(dq_, 0.0f, nidx_ * dimPad_);
         Duplicate(dw_, 0.0f, nidx_);
-        PipeBarrier<PIPE_V>();
         Brcb(dblk_, del_, static_cast<uint8_t>((vis + 7u) / 8u), {1, 8});
-        PipeBarrier<PIPE_V>();
         const uint32_t dimPieces = PiecesOf(dim_);
         const uint32_t nidxPieces = PiecesOf(nidx_);
         const uint8_t dimStride = static_cast<uint8_t>(dimPad_ / FP32_PER_BLOCK);
         for (uint32_t j = 0; j < vis; ++j) {
             const LocalTensor<float> ki = KiRow(b, j);
-            PipeBarrier<PIPE_V>();
             // m = w * delta_j * (u > 0)，u 已含 ReLU
             Muls(dwRow_, u_[j * nidxPad_], INDICATOR_SCALE, nidx_);
-            PipeBarrier<PIPE_V>();
             Mins(dwRow_, dwRow_, 1.0f, nidx_);
-            PipeBarrier<PIPE_V>();
             for (uint32_t p = 0; p < nidxPieces; ++p) {
                 Mul(dwRow_[p * 64u], dwRow_[p * 64u], dblk_[j * 8], MaskOf(nidx_, p),
                     static_cast<uint8_t>(1), {1, 1, 0, 1, 1, 1});
             }
-            PipeBarrier<PIPE_V>();
             Mul(dwRow_, dwRow_, w_, nidx_);
-            PipeBarrier<PIPE_V>();
             // dw += relu(u_j) * delta_j
             for (uint32_t p = 0; p < nidxPieces; ++p) {
                 MulAddDst(dw_[p * 64u], u_[j * nidxPad_ + p * 64u], dblk_[j * 8], MaskOf(nidx_, p),
                           static_cast<uint8_t>(1), {1, 1, 0, 1, 1, 1});
             }
-            PipeBarrier<PIPE_V>();
             Brcb(mblk_, dwRow_, static_cast<uint8_t>((nidx_ + 7u) / 8u), {1, 8});
-            PipeBarrier<PIPE_V>();
             // dq += ki_j ⊗ m_j
             for (uint32_t p = 0; p < dimPieces; ++p) {
                 BinaryRepeatParams dqParams{1, 1, 0, dimStride, 0, 1};
                 MulAddDst(dq_[p * 64u], ki[p * 64u], mblk_, MaskOf(dim_, p),
                           static_cast<uint8_t>(nidx_), dqParams);
             }
-            PipeBarrier<PIPE_V>();
             // dk[j] += sum_i qi[i] * m_ij
             // 用 dstRepStride=0 让一条指令跨 repeat 累加：repeat 对应 index head，
             // src0 按 qiF_ 行距前进，src1 走 mblk_ 的每头 1 个 block。
             Duplicate(dkRow_, 0.0f, dimPad_);
-            PipeBarrier<PIPE_V>();
             {
                 const uint8_t qRepStride = static_cast<uint8_t>(dimPad_ / FP32_PER_BLOCK);
                 const uint8_t mRepStride = 1;
@@ -626,10 +677,8 @@ private:
                               static_cast<uint8_t>(nidx_), dkParams);
                 }
             }
-            PipeBarrier<PIPE_V>();
             if (dkRows_ >= s2_) {
                 Add(dkAcc_[j * dimPad_], dkAcc_[j * dimPad_], dkRow_, dimPad_);
-                PipeBarrier<PIPE_V>();
             } else if (dkPartialElems_ > 0u) {
                 const uint64_t offset = static_cast<uint64_t>(dkOffset_) + static_cast<uint64_t>(taskBase_) * dkPartialElems_ +
                                         static_cast<uint64_t>(j) * dimPad_;
@@ -638,7 +687,6 @@ private:
                 DataCopy(prod_, workspaceGm_[offset], dimPad_);
                 SyncMte2ToVec();
                 Add(dkRow_, dkRow_, prod_, dimPad_);
-                PipeBarrier<PIPE_V>();
                 SyncVecToMte3();
                 DataCopy(workspaceGm_[offset], dkRow_, dimPad_);
                 SyncMte3Done();
@@ -688,7 +736,6 @@ private:
         const uint32_t rowEnd = MinU32(s1_, rowStart + rowsPerTask_);
         rowLoss_ = 0.0f;
         Duplicate(lossAcc_, 0.0f, visPad_);
-        PipeBarrier<PIPE_V>();
         if (coreNum_ > 1u) {
             SyncVecToMte3();
             DataCopy(workspaceGm_[lossOffset_ + static_cast<uint64_t>(task) * 8u], scratch_[384], 8);
@@ -696,10 +743,8 @@ private:
         }
         if (dkRows_ >= s2_) {
             Duplicate(dkAcc_, 0.0f, MinU32(dkRows_, s2_) * dimPad_);
-            PipeBarrier<PIPE_V>();
         } else if (dkPartialElems_ > 0u) {
             Duplicate(dkRow_, 0.0f, dimPad_);
-            PipeBarrier<PIPE_V>();
             SyncVecToMte3();
             for (uint32_t j = 0; j < s2_; ++j) {
                 DataCopy(workspaceGm_[static_cast<uint64_t>(dkOffset_) + static_cast<uint64_t>(taskBase_) * dkPartialElems_ +
@@ -728,14 +773,23 @@ private:
         if (vis == 0u) {
             Duplicate(dq_, 0.0f, nidx_ * dimPad_);
             Duplicate(dw_, 0.0f, nidx_);
-            PipeBarrier<PIPE_V>();
             StoreRowOut(b, row);
             return;
         }
-        LoadWeights(b, row);
-        LoadQRow(b, row);
+        // 行前奏：等上一行的向量/MTE3 读完，一次性发起全部 GM->UB 搬运，只等待一次
+        SyncVecDone();
+        SyncMte3Done();
+        IssueWeights(b, row);
+        IssueRows(queryGm_, (static_cast<uint64_t>(b) * s1_ + row) * n1_ * dim_,
+                  static_cast<uint64_t>(n1_) * dim_, qT_);
+        const uint32_t firstRows = MinU32(kChunkRows_, vis);
+        IssueRows(keyGm_, (static_cast<uint64_t>(b) * s2_) * n1_ * dim_,
+                  static_cast<uint64_t>(firstRows) * n1_ * dim_, kT_);
+        IssueKiAll(b);
+        SyncMte2ToVec();
+        FinishWeights();
+        FinishKiAll();
         LoadQiAll(b, row);
-        LoadKiAll(b);
         ComputeScores(b, vis);
         ComputeTarget(vis);
         ComputeSimilarity(b, vis);
@@ -796,7 +850,6 @@ private:
             const uint32_t b = static_cast<uint32_t>(index / s2_);
             const uint32_t j = static_cast<uint32_t>(index % s2_);
             Duplicate(scratch_, 0.0f, dimPad_);
-            PipeBarrier<PIPE_V>();
             for (uint32_t blk = 0; blk < blocksPerBatch_; ++blk) {
                 const uint32_t t = b * blocksPerBatch_ + blk;
                 SyncVecDone();   // prod_ 可能仍在被上一轮 Add 读取
@@ -805,7 +858,6 @@ private:
                          dimPad_);
                 SyncMte2ToVec();
                 Add(scratch_, scratch_, prod_, dimPad_);
-                PipeBarrier<PIPE_V>();
             }
             const uint64_t offset =
                 static_cast<uint64_t>(b) * s2_ * dim_ + static_cast<uint64_t>(j) * dim_;
@@ -828,7 +880,7 @@ private:
     uint32_t causal_ = 1, rowsPerTask_ = 1, blocksPerBatch_ = 1, taskCount_ = 1;
     uint32_t headBlock_ = 1, dkRows_ = 0, splitDk_ = 0;
     uint32_t dkPartialElems_ = 0, dkOffset_ = 0, lossOffset_ = 0, inputBytes_ = 2, weightBytes_ = 2;
-    uint32_t stageElems_ = 0, kiCacheRows_ = 0;
+    uint32_t stageElems_ = 0, kiCacheRows_ = 0, kChunkRows_ = 1;
     uint32_t coreNum_ = 1;
     float scale_ = 1.0f;
     float rowLoss_ = 0.0f;
@@ -855,6 +907,9 @@ __global__ __aicore__ void dense_lightning_indexer_grad_kl_loss(
     GM_ADDR query, GM_ADDR key, GM_ADDR query_index, GM_ADDR key_index, GM_ADDR weights,
     GM_ADDR d_query_index, GM_ADDR d_key_index, GM_ADDR d_weights, GM_ADDR loss, GM_ADDR workspace,
     GM_ADDR tiling) {
+    // 仅启动 Vector 核，避免为纯 Vector 算子额外拉起 Cube 核的头开销；
+    // 多核路径使用 SyncAll（硬同步），因此必须用带硬同步的 AIV 1:0 类型。
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIV_1_0);
     REGISTER_TILING_DEFAULT(DenseLightningIndexerGradKlLossTilingData);
     GET_TILING_DATA_WITH_STRUCT(DenseLightningIndexerGradKlLossTilingData, tiling_data, tiling);
     if (tiling_data.weightsFp32 != 0u) {

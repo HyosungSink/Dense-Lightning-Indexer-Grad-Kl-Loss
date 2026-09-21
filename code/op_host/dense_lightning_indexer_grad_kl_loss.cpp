@@ -40,6 +40,7 @@ struct Choice {
     uint32_t headBlock = 1;
     uint32_t dkRows = 0;
     uint32_t kiCacheRows = 0;
+    uint32_t kChunkRows = 1;
     DliglUbLayout layout{};
     bool valid = false;
 };
@@ -153,26 +154,39 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
     // ki 缓存优先取 min(s2, 8) 行；UB 放不下时退化为不缓存（逐 key 载入），保证通用性
     const uint32_t kiCacheCandidates[] = {
         std::min(s2, 8u), 4u, 2u, 1u, 0u};
-    const uint32_t headCandidates[] = {32u, 16u, 8u, 4u, 2u, 1u};
+    // 头块优先取大：向量指令条数与 (n1/headBlock) 成正比；A2 上向量流水延迟受限，
+    // 更宽的指令（repeat=headBlock）优于多次窄指令。
+    const uint32_t headCandidates[] = {128u, 64u, 32u, 16u, 8u, 4u, 2u, 1u};
+    const uint32_t keyElemBytes = (inputBytes == 4u) ? 4u : 2u;
+    const uint32_t keyRowBytes = n1 * dimPad * keyElemBytes;
     for (uint32_t cacheRaw : kiCacheCandidates) {
         const uint32_t cacheRows = std::min(cacheRaw, s2);
         for (uint32_t hbRaw : headCandidates) {
             const uint32_t hb = std::min(hbRaw, n1);
+            // 先按最小 key 块（1 行）+ 无 dk 累加器估算基础占用
             const DliglUbLayout base =
                 DliglComputeUbLayout(hb, n1, nidx, dimPad, visPad, n1Pad, nidxPad, 0u, inputBytes,
-                                     weightBytes, stageElems, cacheRows);
+                                     weightBytes, stageElems, cacheRows, 1u);
             if (base.totalBytes > ubBudget) {
                 continue;
             }
-            const uint32_t remain = ubBudget - base.totalBytes;
+            uint32_t remain = ubBudget - base.totalBytes;
+            // key 行块：优先一次装下全部可见 key，装不下时按可用 UB 取最大整块
+            uint32_t kChunkRows = 1u;
+            if (keyRowBytes > 0u) {
+                const uint32_t extra = remain / keyRowBytes;
+                kChunkRows = std::min(s2, 1u + extra);
+                remain -= (kChunkRows - 1u) * keyRowBytes;
+            }
             const uint32_t dkRows = std::min(s2, remain / (dimPad * 4u));
             const DliglUbLayout probe =
                 DliglComputeUbLayout(hb, n1, nidx, dimPad, visPad, n1Pad, nidxPad, dkRows,
-                                     inputBytes, weightBytes, stageElems, cacheRows);
+                                     inputBytes, weightBytes, stageElems, cacheRows, kChunkRows);
             if (probe.totalBytes <= ubBudget) {
                 choice.headBlock = hb;
                 choice.dkRows = dkRows;
                 choice.kiCacheRows = (cacheRows == s2) ? cacheRows : 0u;
+                choice.kChunkRows = kChunkRows;
                 choice.valid = true;
                 break;
             }
@@ -242,6 +256,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context) {
     tiling->lossOffset = static_cast<uint32_t>(lossOffset);
     tiling->wsSysBytes = sysWorkspace;
     tiling->kiCacheRows = choice.kiCacheRows;
+    tiling->kChunkRows = choice.kChunkRows;
     tiling->weightsFp32 = weightsFp32;
     tiling->stageElems = stageElems;
     tiling->blockDimUsed = blockDim;
