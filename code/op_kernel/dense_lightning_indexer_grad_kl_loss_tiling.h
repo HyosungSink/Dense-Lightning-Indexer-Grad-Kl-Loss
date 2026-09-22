@@ -1,182 +1,173 @@
-// Tiling结构体定义的头文件
+// Tiling结构体定义：DenseLightningIndexerGradKlLoss
+//
+// 设计要点：单核（单 block）、纯 Vector（AIV_ONLY）实现，Host 预先算好 UB 布局，
+// Kernel 只做行循环与按 key 的向量运算，避免核内做切分搜索与多核同步。
 #pragma once
 
 #include <cstdint>
 
-// 行分派与 UB 切分参数全部由 Host 计算，Kernel 只做通用循环。
 struct DenseLightningIndexerGradKlLossTilingData {
-    uint32_t batch;           // B
-    uint32_t s1;              // S1
-    uint32_t s2;              // S2
-    uint32_t n1;              // N1 主注意力头数
-    uint32_t nidx;            // Nidx1 indexer 头数
-    uint32_t dim;             // D
-    uint32_t dimPad;          // D 按 32B 对齐的 fp32 行宽
-    uint32_t visPad;          // 可见 key 数按 32B 对齐
-    uint32_t n1Pad;           // N1 按 32B 对齐
-    uint32_t nidxPad;         // Nidx1 按 32B 对齐
-    uint32_t causal;          // 1: rightDownCausal
-    uint32_t rowsPerTask;     // 每任务 query 行数
-    uint32_t blocksPerBatch;  // 每 batch 的任务数
-    uint32_t taskCount;       // 任务总数
-    uint32_t headBlock;       // 主注意力头块
-    uint32_t dkRows;          // UB 中 dk 累加器 key 行数
-    uint32_t splitDk;         // 1: 需要跨任务归约 dKeyIndex
-    uint32_t dkPartialElems;  // 每任务 dk 部分和元素数（0 表示不需要）
-    uint32_t dkOffset;        // workspace 中 dk 部分和起始浮点偏移
-    uint32_t lossOffset;      // workspace 中 loss 累加槽偏移（单个 32B 对齐槽）
-    uint32_t wsSysBytes;      // workspace 起始处系统保留字节数（用户数据偏移）
-    uint32_t kiCacheRows;     // keyIndex 行缓存行数（0 表示不做缓存，逐 key 载入）
-    uint32_t kChunkRows;      // 一次连续载入 UB 的 key 行数（>=1，整块 DMA 取代逐 key DMA）
-    uint32_t weightsFp32;     // 1: weights 为 float32
-    uint32_t stageElems;      // bf16 输入时的 T 暂存元素数（0 表示不需要）
-    uint32_t blockDimUsed;    // 启动核数
-    float scale;              // 注意力缩放系数
+    // ---- 形状 ----
+    uint32_t batch;    // B
+    uint32_t s1;       // S1
+    uint32_t s2;       // S2
+    uint32_t n1;       // 主注意力头数
+    uint32_t nidx;     // indexer 头数
+    uint32_t dim;      // D
+    uint32_t dimPad;   // D 按 32B 对齐后的行宽（元素）
+    uint32_t visPad;   // S2 按 8 对齐
+    uint32_t n1Pad;    // N1 按 8 对齐
+    uint32_t nidxPad;  // Nidx1 按 8 对齐
+    uint32_t tmpPart;  // 辅助区内分片归约区长度（元素）
+    uint32_t tmpLogit; // 辅助区内 logits 暂存区长度（元素）
+    uint32_t tmpElems; // 辅助区浮点数个数
+
+    // ---- 分块参数 ----
+    uint32_t hb;      // 主注意力头块大小（<= n1）
+    uint32_t ib;      // indexer 头块大小（<= nidx）
+    uint32_t kcRows;  // 一次 DMA 载入的 key 行数（>= 1）
+
+    // ---- UB 偏移（字节，均为 32B 对齐）----
+    uint32_t offQ;      // (n1Pad, dimPad) CT
+    uint32_t offK;      // (kcRows * n1Pad, dimPad) CT
+    uint32_t offProdT;  // (hb, dimPad) CT（fp32 输入时与 prodF 同址）
+    uint32_t offProdF;  // (hb, dimPad) fp32
+    uint32_t offQi;     // (nidxPad, dimPad) CT 载入暂存
+    uint32_t offQiF;    // (nidxPad, dimPad) fp32
+    uint32_t offKi;     // (visPad, dimPad) CT
+    uint32_t offKiF;    // (visPad, dimPad) fp32（fp32 输入时与 offKi 同址）
+    uint32_t offSc;     // (visPad, n1Pad) fp32
+    uint32_t offU;      // (visPad, nidxPad) fp32
+    uint32_t offSh;     // visPad fp32（当前 logits）
+    uint32_t offTgt;    // visPad fp32（未归一化 target）
+    uint32_t offPred;   // visPad fp32
+    uint32_t offDel;    // visPad fp32
+    uint32_t offDb;     // 8 * visPad fp32
+    uint32_t offW;      // nidxPad fp32
+    uint32_t offWRaw;   // nidxPad * weightBytes：weights 原始载入暂存
+    uint32_t offDw;     // nidxPad fp32
+    uint32_t offDsb;    // 8 * ib fp32
+    uint32_t offDq;     // (ib, dimPad) fp32
+    uint32_t offDk;     // (visPad, dimPad) fp32
+    uint32_t offMv;     // n1Pad fp32（每头最大值）
+    uint32_t offStage;  // max(ib, visPad) * dimPad CT（写回转换暂存）
+    uint32_t offTmp;    // tmpElems fp32（分片归约 + 标量暂存 + lz）
+    uint32_t ubBytes;   // 总占用
+
+    // ---- 其它 ----
+    uint32_t weightsFp32;  // 1: weights 为 float32
+    float scale;           // 注意力缩放系数
 };
 
-// UB 布局：Host 用它挑选可行切分，Kernel 用它取每个缓冲区的字节偏移。
-struct DliglUbLayout {
-    uint32_t outTOff;    // dimPad 个 T（写回时的转换暂存）
-    uint32_t stageOff;   // bf16 输入时的原始暂存（T）
-    uint32_t qTOff;      // (n1, dimPad) CT 整行 query
-    uint32_t kTOff;      // (kChunkRows * n1, dimPad) CT 连续 key 行块
-    uint32_t prodTOff;   // (headBlock, dimPad) T  乘积（低精度）
-    uint32_t prodOff;    // (headBlock, dimPad) fp32 乘积（相似度按 headBlock 行分块复用）
-    uint32_t qiStageOff; // (QI_STAGE, dimPad) T 分块暂存
-    uint32_t qiFOff;     // (nidx, dimPad) fp32
-    uint32_t kiTOff;     // dimPad T
-    uint32_t kiFOff;     // dimPad fp32
-    uint32_t kiCacheOff;  // (kiCacheRows, dimPad) fp32：keyIndex 行缓存
-    uint32_t kiCacheTOff; // (kiCacheRows, dimPad) T：keyIndex 行缓存载入暂存
-    uint32_t scOff;      // (visPad, n1Pad) fp32 主注意力分数（key-major）
-    uint32_t uOff;       // (visPad, nidxPad) fp32 indexer 相似度（key-major, relu 后）
-    uint32_t tgtOff;
-    uint32_t shOff;
-    uint32_t lossAccOff;  // visPad：按 key 累积的 loss 项
-    uint32_t lzOff;       // 8：lnZ 暂存
-    uint32_t predOff;
-    uint32_t delOff;
-    uint32_t dkOff;      // (dkRows, dimPad) fp32
-    uint32_t dkRowOff;   // dimPad fp32
-    uint32_t dkOutTOff;  // (dkRows, dimPad) T：dKeyIndex 写回的一次性转换暂存
-    uint32_t dqOff;      // (nidx, dimPad) fp32
-    uint32_t maxOff;     // n1Pad fp32
-    uint32_t dblkOff;    // visPad*8 fp32
-    uint32_t mblkOff;    // nidx*8 fp32
-    uint32_t partOff;    // 2048 fp32（逐行归约分片）
-    uint32_t wRawOff;
-    uint32_t wOff;
-    uint32_t wbOff;
-    uint32_t dwOff;
-    uint32_t dwRowOff;
-    uint32_t tmpOff;     // 8*64 fp32
-    uint32_t totalBytes;
-};
+// UB 布局计算：Host 用它对候选 (hb, ib, kcRows) 做可行性判断，Kernel 直接取偏移。
+// inputBytes: query 元素字节数（2/4）；weightBytes: weights 元素字节数（2/4）。
+inline DenseLightningIndexerGradKlLossTilingData DliglComputeLayout(
+    uint32_t batch, uint32_t s1, uint32_t s2, uint32_t n1, uint32_t nidx, uint32_t dim,
+    uint32_t hb, uint32_t ib, uint32_t kcRows, uint32_t inputBytes, uint32_t weightBytes,
+    float scale, uint32_t weightsFp32) {
+    const uint32_t ctBytes = (inputBytes == 4u) ? 4u : 2u;
+    const auto align32 = [](uint64_t v) { return static_cast<uint32_t>((v + 31ull) & ~31ull); };
 
-#ifndef __aicore__
-#define DLIGL_UB_FN inline
-#else
-#define DLIGL_UB_FN __aicore__ inline
-#endif
+    DenseLightningIndexerGradKlLossTilingData t{};
+    t.batch = batch;
+    t.s1 = s1;
+    t.s2 = s2;
+    t.n1 = n1;
+    t.nidx = nidx;
+    t.dim = dim;
+    t.dimPad = (dim + (32u / inputBytes) - 1u) / (32u / inputBytes) * (32u / inputBytes);
+    t.visPad = ((s2 + 7u) / 8u) * 8u;
+    t.n1Pad = ((n1 + 7u) / 8u) * 8u;
+    t.nidxPad = ((nidx + 7u) / 8u) * 8u;
+    t.hb = hb;
+    t.ib = ib;
+    t.kcRows = kcRows;
+    t.weightsFp32 = weightsFp32;
+    t.scale = scale;
 
-constexpr uint32_t QI_STAGE_ROWS = 8u;
+    const uint64_t dimPad = t.dimPad;
+    // 辅助区：分片归约区 + logits 暂存 + 逐元素临时 + 标量暂存
+    const uint32_t rowsMax = (hb > ib) ? hb : ib;
+    const uint32_t p1 = (dim + 63u) / 64u;
+    const uint32_t p2 = (t.nidxPad + 63u) / 64u;
+    const uint32_t p3 = (t.visPad + 63u) / 64u;
+    uint32_t maxPieces = p1 > p2 ? p1 : p2;
+    if (p3 > maxPieces) {
+        maxPieces = p3;
+    }
+    if (maxPieces < 5u) {
+        maxPieces = 5u;
+    }
+    t.tmpPart = maxPieces * (rowsMax > 8u ? rowsMax : 8u) + 64u;
+    t.tmpLogit = t.nidxPad > t.visPad ? t.nidxPad : t.visPad;
+    // 布局：分片归约 | logits | tmpA(visPad) | brc(64，Brcb 固定写 8 个 block)
+    //       | lz | scalarA | scalarB | lossAcc(visPad)
+    t.tmpElems = t.tmpPart + t.tmpLogit + t.visPad + 64u + 24u + t.visPad + 16u;
 
-DLIGL_UB_FN DliglUbLayout DliglComputeUbLayout(uint32_t headBlock, uint32_t n1, uint32_t nidx,
-                                               uint32_t dimPad, uint32_t visPad, uint32_t n1Pad,
-                                               uint32_t nidxPad, uint32_t dkRows, uint32_t inputBytes,
-                                               uint32_t weightBytes, uint32_t stageElems,
-                                               uint32_t kiCacheRows = 0u,
-                                               uint32_t kChunkRows = 1u) {
-    DliglUbLayout l;
     uint32_t off = 0;
-    uint32_t partElems = ((dimPad + 63u) / 64u) * ((n1 > nidx ? n1 : nidx) + 7u & ~7u);
-    if (partElems < 64u) {
-        partElems = 64u;
+    t.offQ = off;
+    off += align32(static_cast<uint64_t>(t.n1Pad) * dimPad * ctBytes);
+    t.offK = off;
+    off += align32(static_cast<uint64_t>(kcRows) * n1 * dimPad * ctBytes);
+    t.offProdF = off;
+    off += align32(static_cast<uint64_t>(hb) * dimPad * 4u);
+    t.offProdT = (ctBytes == 4u) ? t.offProdF : off;
+    if (ctBytes != 4u) {
+        off += align32(static_cast<uint64_t>(hb) * dimPad * ctBytes);
     }
-    if (partElems > 2048u) {
-        partElems = 2048u;
+    t.offQi = off;
+    off += align32(static_cast<uint64_t>(t.nidxPad) * dimPad * ctBytes);
+    t.offQiF = off;
+    if (ctBytes != 4u) {
+        off += align32(static_cast<uint64_t>(t.nidxPad) * dimPad * 4u);
+    } else {
+        t.offQiF = t.offQi;  // fp32 输入无需精度转换，直接原地使用
     }
-    l.outTOff = off;
-    if (inputBytes != 4u) {
-        off += ((dimPad * 2u + 31u) & ~31u);
+    t.offKi = off;
+    off += align32(static_cast<uint64_t>(t.visPad) * dimPad * ctBytes);
+    t.offKiF = off;
+    if (ctBytes != 4u) {
+        off += align32(static_cast<uint64_t>(t.visPad) * dimPad * 4u);
+    } else {
+        t.offKiF = t.offKi;
     }
-    l.stageOff = off;
-    if (stageElems != 0u) {
-        off += ((stageElems * inputBytes + 31u) & ~31u);
+    t.offSc = off;
+    off += align32(static_cast<uint64_t>(t.visPad) * t.n1Pad * 4u);
+    t.offU = off;
+    off += align32(static_cast<uint64_t>(t.visPad) * t.nidxPad * 4u);
+    t.offSh = off;
+    off += align32(static_cast<uint64_t>(t.visPad) * 4u);
+    t.offTgt = off;
+    off += align32(static_cast<uint64_t>(t.visPad) * 4u);
+    t.offPred = off;
+    off += align32(static_cast<uint64_t>(t.visPad) * 4u);
+    t.offDel = off;
+    off += align32(static_cast<uint64_t>(t.visPad) * 4u);
+    t.offDb = off;
+    off += align32(static_cast<uint64_t>(t.visPad) * 8u * 4u);
+    t.offW = off;
+    if (weightBytes == 4u) {
+        t.offWRaw = off;  // fp32 weights：原始数据即最终数据，共用一块
     }
-    l.qTOff = off;
-    off += ((n1 * dimPad * (inputBytes == 4u ? 4u : 2u) + 31u) & ~31u);
-    l.kTOff = off;
-    off += ((kChunkRows * n1 * dimPad * (inputBytes == 4u ? 4u : 2u) + 31u) & ~31u);
-    l.prodTOff = off;
-    if (inputBytes != 4u) {
-        off += ((headBlock * dimPad * 2u + 31u) & ~31u);
+    off += align32(static_cast<uint64_t>(t.nidxPad) * 4u);
+    if (weightBytes != 4u) {
+        t.offWRaw = off;
+        off += align32(static_cast<uint64_t>(t.nidxPad) * weightBytes);
     }
-    l.prodOff = off;
-    off += ((headBlock * dimPad * 4u + 31u) & ~31u);
-    l.qiStageOff = off;
-    if (inputBytes != 4u) {
-        off += ((QI_STAGE_ROWS * dimPad * 2u + 31u) & ~31u);
-    }
-    l.qiFOff = off;
-    off += ((nidx * dimPad * 4u + 31u) & ~31u);
-    l.kiTOff = off;
-    off += ((dimPad * (inputBytes == 4u ? 4u : 2u) + 31u) & ~31u);
-    l.kiFOff = off;
-    off += ((dimPad * 4u + 31u) & ~31u);
-    // keyIndex 行缓存：一次载入全部 key 的 ki，相似度与梯度两遍都走 UB，省掉 2*vis 次 DMA/同步
-    l.kiCacheOff = off;
-    off += ((kiCacheRows * dimPad * 4u + 31u) & ~31u);
-    l.kiCacheTOff = off;
-    if (inputBytes != 4u) {
-        off += ((kiCacheRows * dimPad * 2u + 31u) & ~31u);
-    }
-    l.scOff = off;
-    off += ((visPad * n1Pad * 4u + 31u) & ~31u);
-    l.uOff = off;
-    off += ((visPad * nidxPad * 4u + 31u) & ~31u);
-    l.tgtOff = off;
-    off += ((visPad * 4u + 31u) & ~31u);
-    l.shOff = off;
-    off += ((visPad * 4u + 31u) & ~31u);
-    l.lossAccOff = off;
-    off += ((visPad * 4u + 31u) & ~31u);
-    l.lzOff = off;
-    off += ((64u * 4u + 31u) & ~31u);
-    l.predOff = off;
-    off += ((visPad * 4u + 31u) & ~31u);
-    l.delOff = off;
-    off += ((visPad * 4u + 31u) & ~31u);
-    l.dkOff = off;
-    off += ((dkRows * dimPad * 4u + 31u) & ~31u);
-    l.dkRowOff = off;
-    off += ((dimPad * 4u + 31u) & ~31u);
-    l.dkOutTOff = off;
-    if (inputBytes != 4u) {
-        off += ((dkRows * dimPad * 2u + 31u) & ~31u);
-    }
-    l.dqOff = off;
-    off += ((nidx * dimPad * 4u + 31u) & ~31u);
-    l.maxOff = off;
-    off += ((n1Pad * 4u + 63u) & ~63u);
-    l.dblkOff = off;
-    off += ((visPad * 8u * 4u + 63u) & ~63u);
-    l.mblkOff = off;
-    off += ((nidx * 8u * 4u + 63u) & ~63u);
-    l.partOff = off;
-    off += ((partElems * 4u + 31u) & ~31u);
-    l.wRawOff = off;
-    off += ((nidx * weightBytes + 63u) & ~63u);
-    l.wOff = off;
-    off += ((nidx * 4u + 63u) & ~63u);
-    l.wbOff = off;
-    off += ((nidx * 8u * 4u + 63u) & ~63u);
-    l.dwOff = off;
-    off += ((nidx * 4u + 63u) & ~63u);
-    l.dwRowOff = off;
-    off += ((nidx * 4u + 63u) & ~63u);
-    l.tmpOff = off;
-    off += ((8u * 64u * 4u + 63u) & ~63u);
-    l.totalBytes = off;
-    return l;
+    t.offDw = off;
+    off += align32(static_cast<uint64_t>(t.nidxPad) * 4u);
+    t.offDsb = off;
+    off += align32(static_cast<uint64_t>(ib) * 8u * 4u);
+    t.offDq = off;
+    off += align32(static_cast<uint64_t>(ib) * dimPad * 4u);
+    t.offDk = off;
+    off += align32(static_cast<uint64_t>(t.visPad) * dimPad * 4u);
+    t.offMv = off;
+    off += align32(static_cast<uint64_t>(t.n1Pad) * 4u);
+    t.offStage = off;
+    off += align32(static_cast<uint64_t>(ib > t.visPad ? ib : t.visPad) * dimPad * ctBytes);
+    t.offTmp = off;
+    off += align32(static_cast<uint64_t>(t.tmpElems) * 4u);
+    t.ubBytes = off;
+    return t;
 }
