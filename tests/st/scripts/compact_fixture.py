@@ -66,8 +66,19 @@ def make_fixture(spec: dict, output_root: Path):
     rng = np.random.default_rng(spec.get("seed", 42))
     shapes = [(batch, s1, main_heads, dim), (batch, s2, main_heads, dim),
               (batch, s1, index_heads, dim), (batch, s2, 1, dim), (batch, s1, index_heads)]
-    inputs = [rng.normal(0, deviation, size).astype(np.float32)
-              for size, deviation in zip(shapes, spec.get("deviations", (0.18, 0.18, 0.12, 0.12, 0.2)))]
+    deviations = spec.get("deviations", (0.18, 0.18, 0.12, 0.12, 0.2))
+    distributions = spec.get("distributions", ("normal",) * len(shapes))
+    if len(distributions) != len(shapes):
+        raise ValueError("one distribution is required for each input")
+    inputs = []
+    for shape, deviation, distribution in zip(shapes, deviations, distributions):
+        if distribution == "normal":
+            value = rng.normal(0, deviation, shape)
+        elif distribution == "uniform":
+            value = rng.uniform(-deviation, deviation, shape)
+        else:
+            raise ValueError(f"unknown distribution {distribution}")
+        inputs.append(value.astype(np.float32))
     pattern = spec.get("pattern", "random")
     if pattern == "documented_example":
         for array in inputs:
@@ -86,6 +97,11 @@ def make_fixture(spec: dict, output_root: Path):
             array.fill(0)
     elif pattern != "random":
         raise ValueError(f"unknown pattern {pattern}")
+    if "query_index_prefix" in spec:
+        prefix = np.asarray(spec["query_index_prefix"], dtype=np.float32)
+        if prefix.ndim != 1 or prefix.size > inputs[2].size:
+            raise ValueError("query_index_prefix must fit queryIndex")
+        inputs[2].flat[:prefix.size] = prefix
     inputs = [quantize(array, dtype if i < 4 else weight_dtype) for i, array in enumerate(inputs)]
     outputs = list(compact_reference(inputs, scale, spec.get("causal", True), spec.get("loss_epsilon")))
     layout = spec.get("layout", "BSND")

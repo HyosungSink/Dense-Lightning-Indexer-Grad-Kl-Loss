@@ -22,7 +22,9 @@ python3 -m tests.st.scripts.run_device \
 
 运行前需加载 CANN 环境，并将该构建的 opapi、tiling 和算子包路径配置给运行时。
 `--build-dir` 指向包含 `libcust_opapi.so` 的目录。
-runner 对输出预填 NaN，检查输入/输出前后 64B guard、输入未被修改及每轮的四输出数值。
+runner 对输出预填 NaN，默认检查输入/输出前后 64B guard、输入未被修改及每轮的四输出数值。
+`--guard-bytes 0` 使用未偏移的输入/输出缓冲区；
+它仍检查输入未被修改及输出数值，但不执行越界 guard 检查。
 数值不符、越界或运行错误均返回非零退出码。
 
 `iterations` 保存每轮四输出比较及对应的 `error_ratio`。顶层 `comparisons` 按输出

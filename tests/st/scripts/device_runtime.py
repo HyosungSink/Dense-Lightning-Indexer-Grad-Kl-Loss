@@ -41,7 +41,10 @@ DEFAULT_OP_WAIT_SECONDS = 5
 
 class Runtime:
     def __init__(self, build_dir: Path, device: int = 0,
-                 op_wait_seconds: int = DEFAULT_OP_WAIT_SECONDS):
+                 op_wait_seconds: int = DEFAULT_OP_WAIT_SECONDS, guard_bytes: int = 64):
+        if guard_bytes < 0:
+            raise ValueError("guard_bytes must be nonnegative")
+        self.guard_bytes = guard_bytes
         self.acl = ct.CDLL("libascendcl.so", mode=ct.RTLD_GLOBAL)
         self.nn = ct.CDLL("libnnopbase.so", mode=ct.RTLD_GLOBAL)
         self.op = ct.CDLL(str(build_dir / "libcust_opapi.so"), mode=ct.RTLD_GLOBAL)
@@ -96,9 +99,9 @@ class Runtime:
 
     def tensor(self, array, dtype):
         raw = np.ascontiguousarray(array)
-        # Keep a 64-byte guard immediately adjacent to each tensor on both sides.
-        guarded = np.full(raw.nbytes + 128, 0xA5, dtype=np.uint8)
-        guarded[64:-64] = raw.view(np.uint8).reshape(-1)
+        guard = self.guard_bytes
+        guarded = np.full(raw.nbytes + 2 * guard, 0xA5, dtype=np.uint8)
+        guarded[guard:guard + raw.nbytes] = raw.view(np.uint8).reshape(-1)
         allocation = self.allocate(guarded.nbytes)
         check(self.acl.aclrtMemcpy(allocation, guarded.nbytes, guarded.ctypes.data,
                                   guarded.nbytes, 1), "copy_input")
@@ -106,7 +109,7 @@ class Runtime:
         strides = (ct.c_int64 * raw.ndim)(*[v // raw.itemsize for v in raw.strides])
         tensor = self.nn.aclCreateTensor(dimensions, raw.ndim,
             {"float32": 0, "float16": 1, "bfloat16": 27}[dtype], strides, 0, 2,
-            dimensions, raw.ndim, allocation + 64)
+            dimensions, raw.ndim, allocation + guard)
         if not tensor:
             raise RuntimeError("aclCreateTensor returned null")
         self.tensors.append(tensor)
@@ -116,9 +119,11 @@ class Runtime:
         data = np.empty_like(tensor["guarded"])
         check(self.acl.aclrtMemcpy(data.ctypes.data, data.nbytes, tensor["allocation"],
                                   data.nbytes, 2), "copy_output")
-        guard_ok = bool(np.all(data[:64] == 0xA5) and np.all(data[-64:] == 0xA5))
+        guard = self.guard_bytes
+        guard_ok = bool(not guard or
+                        (np.all(data[:guard] == 0xA5) and np.all(data[-guard:] == 0xA5)))
         raw = tensor["raw"]
-        return data[64:-64].view(raw.dtype).reshape(raw.shape).copy(), guard_ok
+        return data[guard:guard + raw.nbytes].view(raw.dtype).reshape(raw.shape).copy(), guard_ok
 
     def reset(self, tensor):
         original = tensor["guarded"]

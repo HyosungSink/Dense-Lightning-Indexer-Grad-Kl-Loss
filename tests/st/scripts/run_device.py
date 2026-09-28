@@ -46,8 +46,8 @@ def validate_fixture(case_dir: Path):
 
 
 def run(case_dir: Path, build_dir: Path, actual_dir: Path, warmup=0, repeat=1,
-        device=0, op_wait_seconds=DEFAULT_OP_WAIT_SECONDS):
-    if warmup < 0 or repeat < 1 or op_wait_seconds < 0:
+        device=0, op_wait_seconds=DEFAULT_OP_WAIT_SECONDS, guard_bytes=64):
+    if warmup < 0 or repeat < 1 or op_wait_seconds < 0 or guard_bytes < 0:
         raise ValueError("warmup/timeout must be nonnegative and repeat must be positive")
     metadata = validate_fixture(case_dir)
     actual_dir.mkdir(parents=True, exist_ok=True)
@@ -57,12 +57,13 @@ def run(case_dir: Path, build_dir: Path, actual_dir: Path, warmup=0, repeat=1,
         "warmup": warmup, "repeat": repeat, "device": device,
         "build_dir": str(build_dir),
         "op_wait_seconds": op_wait_seconds,
+        "guard_bytes": guard_bytes,
         "error_ratio": error_ratios(()),
         "iterations": [], "comparisons": [], "guards": {},
     }
     runtime = None
     try:
-        runtime = Runtime(build_dir, device, op_wait_seconds)
+        runtime = Runtime(build_dir, device, op_wait_seconds, guard_bytes)
         inputs = []
         for name in COMPACT_INPUT_ORDER:
             entry = metadata["tensors"][name]
@@ -206,7 +207,7 @@ def _execute_process(command, log_path: Path, environment: dict, timeout: float)
 
 
 def run_session(case_dir, build_dir, output, *, profiled, repeat, warmup, device,
-                timeout, op_wait_seconds):
+                timeout, op_wait_seconds, guard_bytes):
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
     report = output / "runner.json"
     command = [
@@ -215,6 +216,7 @@ def run_session(case_dir, build_dir, output, *, profiled, repeat, warmup, device
         "--report", str(report), "--repeat", str(repeat),
         "--warmup", str(0 if profiled else warmup), "--device", str(device),
         "--op-wait-seconds", str(op_wait_seconds),
+        "--guard-bytes", str(guard_bytes),
     ]
     profile = output / "profile"
     if profiled:
@@ -242,9 +244,9 @@ def run_session(case_dir, build_dir, output, *, profiled, repeat, warmup, device
 
 
 def run_sessions(case_dir, build_dir, actual_dir, *, sessions=1, profiled=False,
-                 repeat=5, warmup=5, device=0, timeout=120,
-                 op_wait_seconds=DEFAULT_OP_WAIT_SECONDS):
-    if min(sessions, repeat) < 1 or warmup < 0 or op_wait_seconds < 0:
+                repeat=5, warmup=5, device=0, timeout=120,
+                op_wait_seconds=DEFAULT_OP_WAIT_SECONDS, guard_bytes=64):
+    if min(sessions, repeat) < 1 or warmup < 0 or op_wait_seconds < 0 or guard_bytes < 0:
         raise ValueError("sessions/repeat must be positive; warmup/timeout must be nonnegative")
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("process timeout must be finite and positive")
@@ -261,7 +263,8 @@ def run_sessions(case_dir, build_dir, actual_dir, *, sessions=1, profiled=False,
     for index in range(sessions):
         session = run_session(case_dir, build_dir, root / f"session-{index + 1}",
                               profiled=profiled, repeat=repeat, warmup=warmup, device=device,
-                              timeout=timeout, op_wait_seconds=op_wait_seconds)
+                              timeout=timeout, op_wait_seconds=op_wait_seconds,
+                              guard_bytes=guard_bytes)
         result["sessions"].append(session)
         _write_json(root / "result.json", summarize_run_report(result))
     result = summarize_run_report(result)
@@ -333,10 +336,13 @@ def main():
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--op-wait-seconds", type=int, default=DEFAULT_OP_WAIT_SECONDS,
                         help="operator timeout in seconds; 0 leaves runtime defaults")
+    parser.add_argument("--guard-bytes", type=int, default=64,
+                        help="guard width around tensors; 0 uses unshifted buffers for timing")
     args = parser.parse_args()
     args.warmup = args.warmup if args.warmup is not None else (5 if args.profile else 0)
     args.repeat = args.repeat if args.repeat is not None else (5 if args.profile else 1)
-    if args.warmup < 0 or args.repeat < 1 or args.sessions < 1 or args.op_wait_seconds < 0:
+    if (args.warmup < 0 or args.repeat < 1 or args.sessions < 1 or
+            args.op_wait_seconds < 0 or args.guard_bytes < 0):
         parser.error("warmup/timeout must be nonnegative and repeat must be positive")
     if args.case and not args.suite:
         parser.error("--case requires --suite mock")
@@ -347,7 +353,7 @@ def main():
     if args.suite or args.profile or args.sessions > 1:
         protocol = dict(sessions=args.sessions, profiled=args.profile, repeat=args.repeat,
                         warmup=args.warmup, device=args.device, timeout=args.timeout,
-                        op_wait_seconds=args.op_wait_seconds)
+                        op_wait_seconds=args.op_wait_seconds, guard_bytes=args.guard_bytes)
         lock_path = args.device_lock or Path(f"/tmp/cannjudge/device-{args.device}.lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a") as lock:
@@ -363,7 +369,8 @@ def main():
         print(json.dumps({"report": str(args.report), "passed": passed}))
         return 0 if passed else 1
     result = run(args.case_dir.resolve(), args.build_dir.resolve(), args.actual_dir.resolve(),
-                 args.warmup, args.repeat, args.device, args.op_wait_seconds)
+                 args.warmup, args.repeat, args.device, args.op_wait_seconds,
+                 args.guard_bytes)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps({key: result[key] for key in
